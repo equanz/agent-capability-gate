@@ -6,25 +6,91 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const profile = 'agent-capability-gate-loop';
-const requiredText = [
+const requiredRootSettings = [
   'approval_policy = "never"',
   `default_permissions = "${profile}"`,
   'allow_login_shell = false',
   'web_search = "disabled"',
+];
+const requiredSectionSettings = {
+  'shell_environment_policy.set': [
+    'GIT_CONFIG_NOSYSTEM = "1"',
+    'GIT_CONFIG_GLOBAL = "/dev/null"',
+    'GIT_TERMINAL_PROMPT = "0"',
+  ],
+  features: [
   'plugins = false',
   'apps = false',
   'browser_use = false',
   'computer_use = false',
   'in_app_browser = false',
   'hooks = false',
-  '[apps._default]',
-  'enabled = false',
-  '[mcp_servers.firefox-devtools]',
-  '[mcp_servers.node_repl]',
+  ],
+  'apps._default': ['enabled = false'],
+  agents: [
+    'enabled = true',
+    'max_concurrent_threads_per_session = 1',
+    'default_subagent_model = "gpt-5.6-luna"',
+    'default_subagent_reasoning_effort = "high"',
+  ],
+  'mcp_servers.firefox-devtools': ['enabled = false'],
+  'mcp_servers.node_repl': ['enabled = false'],
+};
+const requiredRuntimeReadSettings = [
+  '"/bin" = "read"',
+  '"/usr/bin" = "read"',
+  '"/usr/lib" = "read"',
+  '"/System/Library" = "read"',
+  '"/usr/local" = "read"',
+  '"~/.n/bin/node" = "read"',
+  '"~/.cargo/bin" = "read"',
+  '"~/.rustup/settings.toml" = "read"',
+  '"~/.rustup/toolchains" = "read"',
+];
+const requiredWorkspaceWriteSettings = [
+  '".git" = "write"',
+  '".git/index.lock" = "write"',
 ];
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+
+function configSections(config) {
+  const sections = new Map([['', []]]);
+  let current = '';
+  for (const rawLine of config.split('\n')) {
+    const section = rawLine.match(/^\[([^\]]+)\]\s*$/);
+    if (section) {
+      current = section[1];
+      if (!sections.has(current)) sections.set(current, []);
+    } else if (rawLine.trim() && !rawLine.trimStart().startsWith('#')) {
+      sections.get(current).push(rawLine.trim());
+    }
+  }
+  return sections;
+}
+
+function missingSettings(config) {
+  const sections = configSections(config);
+  const missing = requiredRootSettings.filter((entry) => !sections.get('').includes(entry))
+    .map((entry) => `root:${entry}`);
+  for (const [section, settings] of Object.entries(requiredSectionSettings)) {
+    for (const entry of settings) {
+      if (!sections.get(section)?.includes(entry)) missing.push(`${section}:${entry}`);
+    }
+  }
+  for (const entry of requiredRuntimeReadSettings) {
+    if (!sections.get(`permissions.${profile}.filesystem`)?.includes(entry)) {
+      missing.push(`permissions.${profile}.filesystem:${entry}`);
+    }
+  }
+  for (const entry of requiredWorkspaceWriteSettings) {
+    if (!sections.get(`permissions.${profile}.filesystem.":workspace_roots"`)?.includes(entry)) {
+      missing.push(`permissions.${profile}.filesystem.:workspace_roots:${entry}`);
+    }
+  }
+  return missing;
 }
 
 function main() {
@@ -35,7 +101,7 @@ function main() {
   const project = path.resolve(args[1]);
   const configPath = path.join(project, '.codex', 'config.toml');
   const config = fs.readFileSync(configPath, 'utf8');
-  const missing = requiredText.filter((entry) => !config.includes(entry));
+  const missing = missingSettings(config);
   if (missing.length) throw new Error(`Remote project config is missing: ${missing.join(', ')}`);
 
   const parsed = run('codex', ['--strict-config', '--help'], { cwd: project, stdio: 'ignore' });
@@ -56,9 +122,15 @@ function main() {
     configPath,
     approvalPolicy: 'never',
     permissionProfile: profile,
+    defaultSubagentModel: 'gpt-5.6-luna',
+    maxConcurrentSubagents: 1,
     enabledCodexMcp: [],
   }, null, 2)}\n`);
 }
 
-try { main(); }
-catch (error) { console.error(`Remote loop config failed: ${error.message}`); process.exitCode = 1; }
+if (require.main === module) {
+  try { main(); }
+  catch (error) { console.error(`Remote loop config failed: ${error.message}`); process.exitCode = 1; }
+}
+
+module.exports = { configSections, missingSettings };

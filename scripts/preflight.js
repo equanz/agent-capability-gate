@@ -57,10 +57,11 @@ function parseArgs() {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === '--static') return { mode: 'static' };
   if (args.length === 1 && args[0] === '--surface') return { mode: 'surface' };
+  if (args.length === 1 && args[0] === '--session') return { mode: 'session' };
   if (args.length !== 9 || args[0] !== '--effective' || args[1] !== '--source-git-dir' ||
       args[3] !== '--outside-sentinel' || args[5] !== '--env-sentinel' ||
       args[7] !== '--codex-home-sentinel') {
-    throw new Error('Usage: preflight.js --static | --surface | --effective --source-git-dir ABS --outside-sentinel ABS --env-sentinel ABS --codex-home-sentinel ABS');
+    throw new Error('Usage: preflight.js --static | --surface | --session | --effective --source-git-dir ABS --outside-sentinel ABS --env-sentinel ABS --codex-home-sentinel ABS');
   }
   const [sourceGitDir, outsideSentinel, envSentinel, codexHomeSentinel] = [args[2], args[4], args[6], args[8]];
   if (![sourceGitDir, outsideSentinel, envSentinel, codexHomeSentinel].every(path.isAbsolute)) throw new Error('Paths must be absolute');
@@ -76,7 +77,12 @@ function staticChecks() {
     if (!config.includes(`"~/${relative}" = "read"`)) failures.push(`Global read allowance missing: ${item}`);
   }
   checkResult('Codex strict config parse', run('codex', ['--strict-config', '--help'], { stdio: 'ignore' }));
-  for (const command of commands) checkResult(`${command} --version`, run(command, ['--version'], { stdio: 'ignore' }));
+  for (const command of commands) {
+    const result = command === 'git'
+      ? git(['--version'])
+      : run(command, ['--version'], { stdio: 'ignore' });
+    checkResult(`${command} --version`, result);
+  }
 }
 
 function checkCodexMcpSurface() {
@@ -112,23 +118,7 @@ function checkRemoteProjectConfig() {
   } catch (error) { failures.push(`Prepared Codex launch cannot be parsed: ${error.message}`); }
 }
 
-function checkGitIsolation(sourceGitDir) {
-  const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  checkResult('Git common dir', common);
-  if (common.status !== 0) return;
-  // The source checkout must be unreadable in the loop profile; compare the
-  // prepared absolute name without opening it here. The outer judge also
-  // checks physical separation before launching the loop.
-  if (fs.realpathSync(common.stdout.trim()) === path.resolve(sourceGitDir)) failures.push('Git common dir shared with source');
-  if (!fs.statSync('.git').isDirectory()) failures.push('.git is not an independent directory');
-  if (fs.existsSync('.git/objects/info/alternates')) failures.push('Git alternates present');
-  const remotes = git(['remote']);
-  checkResult('Git remotes', remotes);
-  if (remotes.stdout.trim()) failures.push('Clone still has a remote');
-  const helper = git(['config', '--local', '--get', 'credential.helper']);
-  if (helper.status === 0 && helper.stdout.trim()) failures.push('Local credential helper present');
-  else if (![0, 1].includes(helper.status)) failures.push('Credential helper inspection failed');
-
+function checkLocalCheckpoint() {
   const tree = git(['write-tree']);
   const head = git(['rev-parse', 'HEAD']);
   checkResult('Git write-tree', tree);
@@ -145,6 +135,25 @@ function checkGitIsolation(sourceGitDir) {
     checkResult('Local preflight ref', git(['update-ref', ref, commit.stdout.trim()]));
     checkResult('Preflight ref cleanup', git(['update-ref', '-d', ref]));
   }
+}
+
+function checkGitIsolation(sourceGitDir) {
+  const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  checkResult('Git common dir', common);
+  if (common.status !== 0) return;
+  // The source checkout must be unreadable in the loop profile; compare the
+  // prepared absolute name without opening it here. The outer judge also
+  // checks physical separation before launching the loop.
+  if (fs.realpathSync(common.stdout.trim()) === path.resolve(sourceGitDir)) failures.push('Git common dir shared with source');
+  if (!fs.statSync('.git').isDirectory()) failures.push('.git is not an independent directory');
+  if (fs.existsSync('.git/objects/info/alternates')) failures.push('Git alternates present');
+  const remotes = git(['remote']);
+  checkResult('Git remotes', remotes);
+  if (remotes.stdout.trim()) failures.push('Clone still has a remote');
+  const helper = git(['config', '--local', '--get', 'credential.helper']);
+  if (helper.status === 0 && helper.stdout.trim()) failures.push('Local credential helper present');
+  else if (![0, 1].includes(helper.status)) failures.push('Credential helper inspection failed');
+  checkLocalCheckpoint();
 }
 
 function checkFilesystem({ outsideSentinel, envSentinel, codexHomeSentinel }) {
@@ -237,10 +246,16 @@ async function effectiveChecks(options) {
   else checkResult('verify all offline', run('./verify', ['all'], { stdio: 'inherit', timeout: 120000 }));
 }
 
+function sessionChecks() {
+  checkRemoteProjectConfig();
+  checkLocalCheckpoint();
+}
+
 async function main() {
   const options = parseArgs();
   staticChecks();
   if (options.mode === 'surface') checkCodexMcpSurface();
+  if (options.mode === 'session') sessionChecks();
   if (options.mode === 'effective') await effectiveChecks(options);
   if (failures.length) {
     console.error(`Preflight failed for ${profile} (${options.mode})`);

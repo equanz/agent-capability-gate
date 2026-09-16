@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Emacs
+.\#*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IntelliJ IDEA
+.idea/
+
+# Visual Studio Code
+.vscode/
+
+# Language Server Protocol
+.cache/clangd/index/
+compile_commands.json
+
+# Claude Code
+CLAUDE.md
+.claude/settings.local.json
+
+# Codex
+.codex/config.toml
+.codex/config.toml
+AGENTS.md
+
+# Git
+_wt/

@@ -92,6 +92,8 @@ Codex が起動する shell command とその child process は、project-specif
 
 自律ループは接続先ホスト上の Codex Remote projectとして開始する。Remote sessionはそのホストのproject設定、permission、MCP、およびskillを使うため、承認方針、permission profile、別ツール面、およびMCPの無効化は独立cloneの`.codex/config.toml`に固定する。ローカルCLIの`-a`や`-c`だけで設定した値はRemote sessionの開始条件にならない。設定を変更した後は新しいRemote sessionを開始し、設定fileの検査と実効tool一覧の検査を完了してからgoalを開始する。
 
+subagentを使う場合は、Lunaを既定modelとし、同時実行数を1に固定する。primary agentだけがgoalの完了判定、permission変更の要求、および最終統合を担当する。Remote sessionでsubagentの実効tool一覧とsandbox denialを一度確認するまで、subagentを使うgoalを開始しない。
+
 Git directoryをwrite可能にするのは独立cloneだけである。通常checkoutまたはworktreeでは既存refやobject storeを共有し得るため、checkpointの自由度と破損時の復旧可能性を両立する隔離単位として使わない。cloneからremote設定とcredential helperを除き、local Git設定、hook、およびrefが壊れてもbaseline remoteと既存checkoutを変更できないことをpreflightで確認する。local commitは復旧用checkpointであって、完了証明やremote公開ではない。
 
 ### Codex の別ツール面
@@ -188,7 +190,7 @@ profileが`:workspace`を継承するか、上記のように明示的な最小p
 8. format、lint、compile、skeleton test、およびpreflightが準備環境で成功することを確認する。
 9. 準備成果を含むbaseline commitをremoteへpushする。cloneの開始元となるcommit SHAをremoteから読み返して確定し、SHA、規範file、検証契約、およびpermissionのsnapshotをclone外の終了判定側に固定する。baseline commitが判定終了までremoteに残るよう保持する。remote作成とpushは自律ループでは行わない。
 10. baselineから既存checkoutとGit directoryを共有せず、Git alternatesも持たない独立cloneを作る。remote設定を削除し、Gitのglobal/system configとcredential helperを使わない起動環境、local author identity、および`.work`を準備する。
-11. 独立cloneの`.codex/config.toml`に`approval_policy = "never"`、`default_permissions = "agent-capability-gate-loop"`、別ツール面の無効化、およびCodex側MCPの明示的な無効化を含める。Remote projectとしてそのcloneを開き、新しいsessionで実効権限、local commit、baseline検証、および実際に提示されたtool一覧をpreflightで確認する。CLIの起動引数やpromptだけを設定根拠にしない。
+11. 独立cloneの`.codex/config.toml`に`approval_policy = "never"`、`default_permissions = "agent-capability-gate-loop"`、別ツール面の無効化、およびCodex側MCPの明示的な無効化を含める。Remote projectとしてそのcloneを開き、新しいsessionでまず`preflight --session`により実効設定と破棄可能なlocal checkpointを確認する。その後にbaseline検証と実際に提示されたtool一覧を確認する。CLIの起動引数やpromptだけを設定根拠にしない。
 12. cloneを編集できない別の実行主体が、候補commitの取得、baselineとの差分検査、cleanな候補checkoutでの全検証、および規範からtestへのdrift reviewを行えることを開始前に試す。
 
 準備時に昇格して成功した command は、自律実行の検証済み経路として扱わない。最終 profile で同じ検証が成功しない限り、ループを開始しない。
