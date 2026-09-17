@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf '%s\n' 'usage: verify {format|lint|unit|property|e2e-cli|e2e-mcp|requirements|all}' >&2
+    exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+command=$1
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export CARGO_HOME="${CARGO_HOME:-$repo_root/.work/cargo-home}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/.work/target}"
+# The sandbox can retain prior incremental sessions without allowing their
+# cleanup. Verification is reproducible without them and needs only repo-local
+# temporary state.
+export CARGO_INCREMENTAL=0
+
+cargo_locked() {
+    cargo --locked --offline "$@"
+}
+
+case "$command" in
+    format)
+        cargo fmt --all -- --check
+        ;;
+    lint)
+        cargo_locked clippy --workspace --all-targets -- -D warnings
+        ;;
+    unit)
+        cargo_locked test --workspace --lib
+        ;;
+    property)
+        cargo_locked test --workspace --tests
+        ;;
+    e2e-cli)
+        cargo_locked test -p mcp-boundary --test cli_e2e
+        ;;
+    e2e-mcp)
+        cargo_locked test -p mcp-boundary --test upstream_e2e
+        cargo_locked test -p mcp-boundary --test public_upstream_e2e
+        ;;
+    requirements)
+        node scripts/verify-requirements.js
+        ;;
+    all)
+        for check in format lint unit property e2e-cli e2e-mcp requirements; do
+            "$0" "$check"
+        done
+        ;;
+    *)
+        usage
+        ;;
+esac

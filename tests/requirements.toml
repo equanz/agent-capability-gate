@@ -1,0 +1,263 @@
+# Machine-readable map from the verification design to executable evidence or
+# an explicit final architecture-review criterion.  A review entry is not an
+# automated pass claim; it records the check that must remain visible at goal
+# termination.
+
+[[requirement]]
+id = "P01"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs"]
+criterion = "Review tools_json and resolve paths: only configured tools, arguments, targets, and credentials may enter the public catalog or invocation."
+
+[[requirement]]
+id = "P02"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs"]
+criterion = "Review catalog construction and MCP adaptation: arbitrary upstream tools and arguments must not be copied into the public catalog."
+
+[[requirement]]
+id = "P03"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::arbitrary_unknown_input_never_resolves", "crates/boundary/tests/cli_e2e.rs::invalid_unknown_and_nul_inputs_are_rejected_before_cli_invocation"]
+criterion = "Property and public-boundary tests reject arbitrary additional input properties before target execution."
+
+[[requirement]]
+id = "P04"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::mcp_binding_keeps_literal_environment_and_target_fixed"]
+criterion = "Resolved MCP bindings preserve policy-owned literal and environment values across valid input variations."
+
+[[requirement]]
+id = "P05"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::mcp_binding_keeps_literal_environment_and_target_fixed", "crates/core/src/lib.rs::valid_inputs_cannot_change_mcp_target_or_fixed_bindings"]
+criterion = "Resolved MCP invocations retain the configured executable, target ID, cwd, argv, and upstream tool for valid input variations."
+
+[[requirement]]
+id = "P06"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::normalization_is_deterministic_for_map_order", "crates/core/src/lib.rs::map_order_and_input_order_do_not_change_normalized_observations"]
+criterion = "Equivalent normalized configurations and inputs produce equal catalog and resolved invocation observations."
+
+[[requirement]]
+id = "P07"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::normalization_is_deterministic_for_map_order", "crates/core/src/lib.rs::map_order_and_input_order_do_not_change_normalized_observations", "crates/boundary/tests/cli_e2e.rs::check_and_tools_are_target_free_and_have_stable_diagnostics"]
+criterion = "Core normalization and the public tools command preserve deterministic catalog and argv ordering."
+
+[[requirement]]
+id = "P08"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/src/main.rs::parse_schema_and_binding_failures_do_not_enter_executor", "crates/boundary/tests/cli_e2e.rs"]
+criterion = "The unit seam observes zero executor calls for parse, schema, and binding failures; review the remaining parse, validation, binding, and public protocol failure paths not covered by that focused spy."
+
+[[requirement]]
+id = "P09"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::serve_executes_fake_cli_without_shell_and_returns_bounded_result"]
+criterion = "The fake CLI receives argv directly and observes immediate stdin EOF."
+
+[[requirement]]
+id = "P10"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::serve_observes_only_configured_cwd_and_environment"]
+criterion = "The fake CLI observes only the explicitly configured environment key set."
+
+[[requirement]]
+id = "P11"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::serve_observes_only_configured_cwd_and_environment"]
+criterion = "The fake CLI observes the configured cwd and fixed argv independent of request input."
+
+[[requirement]]
+id = "P12"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs", "crates/runtime/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/public_request_limits_e2e.rs::request_bytes_boundary_is_accepted_and_one_over_is_rejected_before_cli", "crates/boundary/tests/public_request_limits_e2e.rs::json_depth_overflow_is_rejected_before_cli"]
+criterion = "Core tests cover several configured limits and raw-boundary tests cover request bytes, JSON depth, and admission overload; review exact acceptance and one-over rejection for every remaining finite message, string, array, tool, pattern, and concurrency limit."
+
+[[requirement]]
+id = "P13"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/cli_e2e.rs", "crates/boundary/tests/public_upstream_e2e.rs::public_upstream_timeout_and_stderr_overflow_are_bounded_failures"]
+criterion = "CLI and upstream tests cover representative timeout, cancellation, output-limit, and target-failure paths; review the remaining signal, descendant, cancellation-ignore, and reap routes for finite completion and stable broker errors."
+
+[[requirement]]
+id = "P14"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/tests/public_upstream_e2e.rs", "crates/boundary/tests/cli_e2e.rs"]
+criterion = "Review process ownership, actor serialization, retry policy, and reap paths for every child termination route; process reuse and busy observations are not complete lifecycle proof."
+
+[[requirement]]
+id = "P15"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::catalog_schema_is_the_schema_used_by_validation"]
+criterion = "The published input schema is the same normalized schema used by runtime validation."
+
+[[requirement]]
+id = "P16"
+kind = "test"
+status = "covered"
+references = ["crates/core/src/lib.rs::invalid_config_is_never_partially_adopted", "crates/boundary/tests/cli_e2e.rs::invalid_config_rejects_serve_before_accepting_mcp_messages"]
+criterion = "Property and public-startup tests reject an invalid configuration without adopting a partial target or public catalog."
+
+[[requirement]]
+id = "P17"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/tests/process_limit_e2e.rs"]
+criterion = "Review all broker-generated errors and diagnostics for secret-free content; target stderr must not be forwarded raw, and the CLI sentinel test must be extended or complemented for every broker error path."
+
+[[requirement]]
+id = "P18"
+kind = "review"
+status = "review"
+references = ["crates/boundary/tests/public_upstream_e2e.rs", "crates/runtime/src/lib.rs"]
+criterion = "Review the complete result-adaptation boundary: target bytes and upstream content may only become the documented typed result, while policy, catalog, and diagnostics remain broker-owned."
+
+[[requirement]]
+id = "P19"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_modern_and_legacy_clients_resolve_the_same_call"]
+criterion = "The differential public-client test compares catalog and call results for the same configuration and input across modern and legacy revisions."
+
+[[requirement]]
+id = "P20"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs", "crates/runtime/src/lib.rs"]
+criterion = "Review crate boundaries: core has no MCP transport dependency and only the runtime adapter handles revision negotiation."
+
+[[requirement]]
+id = "E01"
+kind = "review"
+status = "review"
+references = ["crates/boundary/tests/cli_e2e.rs", "crates/core/src/lib.rs"]
+criterion = "Review the complete check boundary, including valid and invalid configs, scalar-root schemas, target-limit boundaries, output-kind mismatches, path diagnostics, and target non-start."
+
+[[requirement]]
+id = "E02"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::check_and_tools_are_target_free_and_have_stable_diagnostics"]
+criterion = "tools emits deterministic normalized catalog ordering without starting a target."
+
+[[requirement]]
+id = "E03"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::invalid_config_rejects_serve_before_accepting_mcp_messages", "crates/boundary/tests/public_upstream_e2e.rs::public_stdio_calls_modern_and_legacy_upstreams_with_fixed_binding"]
+criterion = "Valid serve instances accept a public request, while invalid startup emits no MCP success message."
+
+[[requirement]]
+id = "E04"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/cli_e2e.rs"]
+criterion = "The process-limit E2E covers bounded text/JSON, deterministic compact JSON, nonzero termination, invalid JSON, output overflow, and no raw stderr; review signal termination and any remaining E04 result-adaptation paths."
+
+[[requirement]]
+id = "E05"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs", "crates/boundary/src/main.rs"]
+criterion = "Unit and public tests cover representative schema/resource failures, unsupported regex, and NUL input; review the complete schema matrix, scalar-root behavior, every supported boundary, and invocation-free rejection outside those cases."
+
+[[requirement]]
+id = "E06"
+kind = "review"
+status = "review"
+references = ["crates/boundary/src/main.rs", "crates/runtime/src/lib.rs", "crates/core/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/public_request_limits_e2e.rs::request_bytes_boundary_is_accepted_and_one_over_is_rejected_before_cli", "crates/boundary/tests/public_request_limits_e2e.rs::json_depth_overflow_is_rejected_before_cli"]
+criterion = "Raw tests cover request-byte and JSON-depth boundaries and the pipeline test covers admission overload; review the complete message, string, array, config, tool, pattern, and concurrency limit matrix at exact and one-over boundaries."
+
+[[requirement]]
+id = "E07"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/cli_e2e.rs::serve_executes_fake_cli_without_shell_and_returns_bounded_result"]
+criterion = "A shell metacharacter remains one argv value, with no canary execution and immediate stdin EOF."
+
+[[requirement]]
+id = "E08"
+kind = "review"
+status = "review"
+references = ["crates/core/src/lib.rs", "crates/runtime/src/lib.rs", "crates/boundary/tests/cli_e2e.rs", "crates/boundary/tests/public_upstream_e2e.rs"]
+criterion = "Property and E2E tests cover representative fixed CLI context and MCP binding; review executable, argv, cwd, environment, credential, and upstream-tool construction against all unknown-input paths."
+
+[[requirement]]
+id = "E09"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/cli_e2e.rs"]
+criterion = "Review timeout, cancellation, output overflow, signal-ignore, descendant, process-group termination, and reap behavior; current tests cover only a subset of these terminal paths."
+
+[[requirement]]
+id = "E10"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_stdio_calls_modern_and_legacy_upstreams_with_fixed_binding"]
+criterion = "The public MCP call sends only the fixed upstream tool and resolved fixed-plus-input arguments."
+
+[[requirement]]
+id = "E11"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_catalog_does_not_adopt_upstream_tools_or_arguments"]
+criterion = "The catalog-noise upstream E2E advertises additional upstream tools and arguments while asserting the configured public catalog and schema remain unchanged."
+
+[[requirement]]
+id = "E12"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_stdio_does_not_forward_unsupported_content_or_meta", "crates/boundary/tests/public_upstream_e2e.rs::public_upstream_failures_are_stable_and_do_not_forward_raw_content", "crates/boundary/tests/public_upstream_e2e.rs::public_upstream_timeout_and_stderr_overflow_are_bounded_failures"]
+criterion = "Upstream E2E fixtures cover output-kind mismatch, invalid and mixed content, server request, input_required, protocol error, timeout, stderr overflow, process termination, and removal of _meta without exposing raw content."
+
+[[requirement]]
+id = "E13"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/tests/public_upstream_e2e.rs", "crates/boundary/tests/cli_e2e.rs"]
+criterion = "Review target reuse, EOF, signal shutdown, idle shutdown, public STDIO EOF, and process cleanup across the complete broker lifetime; reuse evidence alone is insufficient."
+
+[[requirement]]
+id = "E14"
+kind = "review"
+status = "review"
+references = ["crates/boundary/tests/public_upstream_e2e.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/runtime/src/lib.rs"]
+criterion = "Review same-target serialization, exactly-one SERVER_BUSY behavior, cancellation that ignores cancellation, post-timeout process replacement, and the distinction between global admission and per-target serialization."
+
+[[requirement]]
+id = "E15"
+kind = "review"
+status = "review"
+references = ["crates/runtime/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/tests/process_limit_e2e.rs"]
+criterion = "Review environment and every target-error diagnostic path to ensure credential sentinels never enter broker output or stderr; the CLI sentinel test does not cover all MCP error paths."
+
+[[requirement]]
+id = "E16"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_modern_and_legacy_clients_resolve_the_same_call", "crates/boundary/src/main.rs"]
+criterion = "The raw public STDIO E2E compares catalog and call semantics for modern and legacy public client revisions against the same configuration and input."
+
+[[requirement]]
+id = "E17"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/public_upstream_e2e.rs::public_stdio_calls_modern_and_legacy_upstreams_with_fixed_binding", "crates/boundary/tests/public_upstream_e2e.rs::public_legacy_discovery_restarts_once_and_calls_once"]
+criterion = "Upstream E2E covers modern discovery, legacy fallback, the permitted legacy restart, exactly-once tool request behavior, and revision-independent fixed binding."

@@ -1,0 +1,28 @@
+[package]
+name = "mcp-boundary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mcp-boundary"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-cli"
+path = "../test-support/src/bin/fake-cli.rs"
+
+[[bin]]
+name = "fake-mcp"
+path = "../test-support/src/bin/fake-mcp.rs"
+
+[dependencies]
+clap.workspace = true
+mcp-boundary-core = { path = "../core" }
+mcp-boundary-runtime = { path = "../runtime" }
+nix.workspace = true
+serde-json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde-json.workspace = true

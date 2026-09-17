@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/runtime",
+    "crates/boundary",
+    "crates/test-support",
+]
+default-members = ["crates/boundary"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+nix = { version = "0", features = ["process", "signal"] }
+proptest = "1"
+regex = "1"
+rmcp = "3"
+serde = { version = "1", features = ["derive"] }
+serde-json = { package = "serde_json", version = "1" }
+serde-saphyr = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }

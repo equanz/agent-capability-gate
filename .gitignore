@@ -23,8 +23,13 @@ CLAUDE.md
 
 # Codex
 .codex/config.toml
-.codex/config.toml
 AGENTS.md
 
 # Git
 _wt/
+
+# Project build state
+.work/
+target/
+target-cancel/
+vendor/
