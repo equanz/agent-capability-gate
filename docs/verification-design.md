@@ -163,7 +163,7 @@ property testはcase数とseedを固定入力として受け、失敗時にseed�
 | E12 | MCP E2E | output kind不一致、invalid／mixed content、protocol error、timeout、stderr超過 | raw内容を成功公開せず、`_meta`なし、超過process終了 |
 | E13 | MCP process E2E | 連続call、idle終了、公開STDIO EOF、SIGINT、SIGTERM | instance再利用、必要時だけ再起動、全process回収、broker終了status |
 | E14 | MCP process E2E | 同一targetへ同時call、cancel無視 | 二件目`SERVER_BUSY`、一件目終了後は新processで成功可能 |
-| E15 | CLI＋MCP E2E | secret sentinelを含むenvironmentとtarget error | broker生成resultとstderrにsentinelなし |
+| E15 | CLI＋MCP E2E | secret sentinelを含むenvironmentとtarget error、debug無効／有効の公開call | broker生成resultとstderrにsentinelなし。debug有効時だけ一call一つの安全なJSON eventを出し、stdoutはMCP wireだけを保つ |
 | E16 | raw MCP E2E | modernとlegacy clientから同じcall | catalog、validation、resolved invocationの意味が同一 |
 | E17 | MCP process E2E | modern、legacy同一process、legacy再起動mode | negotiation成功、tool request一回、revisionによるbinding差なし |
 

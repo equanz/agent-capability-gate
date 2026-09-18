@@ -184,7 +184,7 @@ call deadlineはadmission成功直後から、targetの起動、negotiation、re
 
 公開側とupstream側のSTDIOは、MCP SDKがJSON decodeする前に一messageのraw byte数を数えるadapterを通す。delimiter到達前に上限を超えた場合は、そのmessageをparseせず接続を失敗させる。decode後は深さ、string、およびarray上限をcoreのnormalizerで再検査する。
 
-stdoutはMCP wire専用で、診断を一byteも書かない。診断はstderrへ一行一JSON objectで出す。upstream processについてもstdoutをprotocol専用として扱い、stderrは設定した上限内でdrainするが公開resultへ暗黙には含めない。
+stdoutはMCP wire専用で、診断を一byteも書かない。診断はstderrへ一行一JSON objectで出す。`MCP_BOUNDARY_LOG=debug`を明示した起動では、公開`tools/call`ごとの安全な完了eventもstderrへ出す。eventの有効化、形状、および情報境界は[Debug 観測性の設計](observability-design.md)に従う。upstream processについてもstdoutをprotocol専用として扱い、stderrは設定した上限内でdrainするが公開resultへ暗黙には含めない。
 
 ## CLI executor
 
@@ -263,7 +263,7 @@ BrokerError {
 
 - protocol error: malformed envelope、未知method、未知tool、capacityまたはlifecycle上のserver拒否。
 - tool error: target起動後の失敗、timeout、output failure、cancellation。
-- operator diagnostic: 設定失敗、内部不変条件違反、shutdown failure。
+- operator diagnostic: 設定失敗、内部不変条件違反、shutdown failure、およびdebug有効時の安全なcall完了event。
 
 wire分類は次で固定する。
 

@@ -17,7 +17,8 @@ use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -67,6 +68,125 @@ enum PublicRevision {
 
 struct LoadedConfig {
     config: ValidatedConfig,
+}
+
+/// Opt-in operator diagnostics for completed public tool calls.  The logger
+/// deliberately owns only stable, configuration-derived labels: request
+/// arguments and target output never cross this boundary.
+#[derive(Clone)]
+struct DebugLogger {
+    enabled: bool,
+    next_correlation_id: Arc<AtomicU64>,
+    stderr: Arc<Mutex<io::Stderr>>,
+}
+
+impl DebugLogger {
+    fn from_environment() -> Self {
+        Self {
+            enabled: std::env::var("MCP_BOUNDARY_LOG").as_deref() == Ok("debug"),
+            next_correlation_id: Arc::new(AtomicU64::new(1)),
+            stderr: Arc::new(Mutex::new(io::stderr())),
+        }
+    }
+
+    fn begin(&self, tool: &str, target: Option<&str>) -> DebugCall {
+        DebugCall {
+            logger: self.clone(),
+            correlation_id: self.next_correlation_id.fetch_add(1, Ordering::Relaxed),
+            tool: tool.to_owned(),
+            target: target.map(str::to_owned),
+            outcome: "rejected",
+            code: Some("INVALID_ARGUMENTS"),
+            finished: false,
+        }
+    }
+
+    fn inactive(&self) -> DebugCall {
+        DebugCall {
+            logger: self.clone(),
+            correlation_id: 0,
+            tool: String::new(),
+            target: None,
+            outcome: "rejected",
+            code: Some("INVALID_ARGUMENTS"),
+            finished: true,
+        }
+    }
+
+    fn emit(&self, call: &DebugCall) {
+        if !self.enabled {
+            return;
+        }
+        let mut event = serde_json::Map::new();
+        event.insert(
+            "event".to_owned(),
+            Value::String("tool_call_finished".to_owned()),
+        );
+        event.insert(
+            "correlation_id".to_owned(),
+            Value::Number(call.correlation_id.into()),
+        );
+        event.insert("tool".to_owned(), Value::String(call.tool.clone()));
+        if let Some(target) = &call.target {
+            event.insert("target".to_owned(), Value::String(target.clone()));
+        }
+        event.insert("outcome".to_owned(), Value::String(call.outcome.to_owned()));
+        if let Some(code) = call.code {
+            event.insert("code".to_owned(), Value::String(code.to_owned()));
+        }
+        let Ok(line) = serde_json::to_vec(&Value::Object(event)) else {
+            return;
+        };
+        let Ok(mut stderr) = self.stderr.lock() else {
+            return;
+        };
+        let _ = stderr.write_all(&line);
+        let _ = stderr.write_all(b"\n");
+        let _ = stderr.flush();
+    }
+}
+
+struct DebugCall {
+    logger: DebugLogger,
+    correlation_id: u64,
+    tool: String,
+    target: Option<String>,
+    outcome: &'static str,
+    code: Option<&'static str>,
+    finished: bool,
+}
+
+impl DebugCall {
+    fn success(&mut self) {
+        self.outcome = "success";
+        self.code = None;
+        self.finish();
+    }
+
+    fn error(&mut self, code: BrokerErrorCode) {
+        self.outcome = "error";
+        self.code = Some(code.as_str());
+        self.finish();
+    }
+
+    fn rejected(&mut self, code: BrokerErrorCode) {
+        self.outcome = "rejected";
+        self.code = Some(code.as_str());
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.logger.emit(self);
+        }
+    }
+}
+
+impl Drop for DebugCall {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 fn main() {
@@ -259,6 +379,7 @@ fn emit_diagnostic(config_path: &str, diagnostic: &Diagnostic) {
 async fn serve_stdio(loaded: LoadedConfig) -> Result<(), Diagnostic> {
     let stdout = Arc::new(AsyncMutex::new(io::BufWriter::new(io::stdout())));
     let config = Arc::new(loaded.config);
+    let debug = DebugLogger::from_environment();
     let admission = Admission::new();
     let cancellation = Cancellation::new();
     let mcp = McpExecutor::with_admission(admission.clone());
@@ -345,23 +466,17 @@ async fn serve_stdio(loaded: LoadedConfig) -> Result<(), Diagnostic> {
             }));
             continue;
         }
-        let config = Arc::clone(&config);
-        let stdout = Arc::clone(&stdout);
-        let mcp = mcp.clone();
-        let admission = admission.clone();
-        let cancellation = cancellation.clone();
-        let revision = Arc::clone(&revision);
+        let context = RequestContext {
+            config: Arc::clone(&config),
+            stdout: Arc::clone(&stdout),
+            mcp: mcp.clone(),
+            admission: admission.clone(),
+            cancellation: cancellation.clone(),
+            revision: Arc::clone(&revision),
+            debug: debug.clone(),
+        };
         tasks.push(tokio::spawn(async move {
-            handle_request(
-                &config,
-                &mcp,
-                &admission,
-                &cancellation,
-                &revision,
-                request,
-                stdout,
-            )
-            .await
+            handle_request(context, request).await
         }));
     }
     // Public EOF and process signals both start broker shutdown. Active
@@ -576,15 +691,26 @@ fn validate_params(method: &str, params: &Value) -> Option<&'static str> {
     None
 }
 
-async fn handle_request(
-    config: &ValidatedConfig,
-    mcp: &McpExecutor,
-    admission: &Admission,
-    cancellation: &Cancellation,
-    revision: &Arc<AsyncMutex<PublicRevision>>,
-    request: Value,
+struct RequestContext {
+    config: Arc<ValidatedConfig>,
     stdout: Arc<AsyncMutex<io::BufWriter<io::Stdout>>>,
-) -> Result<(), Diagnostic> {
+    mcp: McpExecutor,
+    admission: Admission,
+    cancellation: Cancellation,
+    revision: Arc<AsyncMutex<PublicRevision>>,
+    debug: DebugLogger,
+}
+
+async fn handle_request(context: RequestContext, request: Value) -> Result<(), Diagnostic> {
+    let RequestContext {
+        config,
+        stdout,
+        mcp,
+        admission,
+        cancellation,
+        revision,
+        debug,
+    } = context;
     let id = request.get("id").cloned();
     if let Some(message) = validate_envelope(&request) {
         write_error(&stdout, id, "INVALID_ARGUMENTS", message).await?;
@@ -592,7 +718,21 @@ async fn handle_request(
     }
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let mut debug_call = if method == "tools/call" {
+        let name = params.get("name").and_then(Value::as_str);
+        let known_tool = name.filter(|name| config.tools.contains_key(*name));
+        let target = known_tool
+            .and_then(|name| config.tools.get(name))
+            .map(|tool| tool.target.as_str());
+        debug.begin(known_tool.unwrap_or("unknown"), target)
+    } else {
+        // This call is never emitted because it is not a public tools/call.
+        debug.inactive()
+    };
     if let Some(message) = validate_params(method, &params) {
+        if method == "tools/call" {
+            debug_call.rejected(BrokerErrorCode::InvalidArguments);
+        }
         write_error(&stdout, id, "INVALID_ARGUMENTS", message).await?;
         return Ok(());
     }
@@ -691,7 +831,7 @@ async fn handle_request(
                 )
                 .await?;
             } else {
-                write_result(&stdout, id, tools_json(config)).await?;
+                write_result(&stdout, id, tools_json(&config)).await?;
             }
         }
         "tools/call" => {
@@ -711,14 +851,17 @@ async fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let Some(name) = name else {
+                debug_call.rejected(BrokerErrorCode::InvalidArguments);
                 write_error(&stdout, id, "INVALID_ARGUMENTS", "tool name is required").await?;
                 return Ok(());
             };
             if cancellation.is_cancelled() {
+                debug_call.rejected(BrokerErrorCode::TargetUnavailable);
                 write_error(&stdout, id, "TARGET_UNAVAILABLE", "broker is shutting down").await?;
                 return Ok(());
             }
             if !config.tools.contains_key(name) {
+                debug_call.rejected(BrokerErrorCode::InvalidArguments);
                 write_error(&stdout, id, "INVALID_ARGUMENTS", "unknown tool").await?;
                 return Ok(());
             }
@@ -728,19 +871,26 @@ async fn handle_request(
                 .and_then(|tool| tool.mcp.as_ref())
                 .is_some()
             {
-                match resolve_mcp_then_execute(config, name, &arguments, |invocation| {
-                    mcp.execute_with_cancellation(invocation, cancellation)
+                match resolve_mcp_then_execute(&config, name, &arguments, |invocation| {
+                    mcp.execute_with_cancellation(invocation, &cancellation)
                 }) {
                     Ok(execution) => match execution.await {
                         Ok(result) => {
+                            if result.is_error {
+                                debug_call.error(result.code);
+                            } else {
+                                debug_call.success();
+                            }
                             write_execution(&stdout, id, result, *revision.lock().await).await?
                         }
                         Err(error) => {
+                            debug_call.error(error.code);
                             write_runtime_error_async(&stdout, id, error, *revision.lock().await)
                                 .await?
                         }
                     },
                     Err(error) => {
+                        debug_call.rejected(error.code);
                         write_tool_error_async(
                             &stdout,
                             id,
@@ -752,19 +902,30 @@ async fn handle_request(
                     }
                 }
             } else {
-                match resolve_cli_then_execute(config, name, &arguments, |invocation| {
-                    execute_cli_with_admission_and_cancellation(invocation, admission, cancellation)
+                match resolve_cli_then_execute(&config, name, &arguments, |invocation| {
+                    execute_cli_with_admission_and_cancellation(
+                        invocation,
+                        &admission,
+                        &cancellation,
+                    )
                 }) {
                     Ok(execution) => match execution.await {
                         Ok(result) => {
+                            if result.is_error {
+                                debug_call.error(result.code);
+                            } else {
+                                debug_call.success();
+                            }
                             write_execution(&stdout, id, result, *revision.lock().await).await?
                         }
                         Err(error) => {
+                            debug_call.error(error.code);
                             write_runtime_error_async(&stdout, id, error, *revision.lock().await)
                                 .await?
                         }
                     },
                     Err(error) => {
+                        debug_call.rejected(error.code);
                         write_tool_error_async(
                             &stdout,
                             id,
