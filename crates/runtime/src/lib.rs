@@ -12,7 +12,7 @@ use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(unix)]
 use std::{io, os::unix::process::CommandExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -36,12 +36,29 @@ pub struct ExecutionResult {
     /// and the CLI adapter; public MCP serialization uses this vector.
     pub text_blocks: Vec<String>,
     pub structured: Option<Value>,
+    /// Target-side information reserved for opt-in operator diagnostics. It
+    /// is never adapted into the public MCP result.
+    pub observation: Option<TargetObservation>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TargetObservation {
+    pub stderr: Vec<u8>,
+    pub exit: Option<TargetExit>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TargetExit {
+    Code(i32),
+    Signal(i32),
 }
 
 #[derive(Debug)]
 pub struct RuntimeError {
     pub code: BrokerErrorCode,
     pub message: &'static str,
+    /// Target-side information reserved for opt-in operator diagnostics.
+    pub observation: Option<TargetObservation>,
 }
 
 /// A target-scoped MCP actor collection.  The process, negotiated revision,
@@ -114,6 +131,7 @@ impl Default for Cancellation {
 pub struct McpExecutor {
     targets: Arc<Mutex<HashMap<String, Arc<McpTarget>>>>,
     admission: Admission,
+    capture_diagnostics: bool,
 }
 
 impl Default for McpExecutor {
@@ -124,9 +142,16 @@ impl Default for McpExecutor {
 
 impl McpExecutor {
     pub fn with_admission(admission: Admission) -> Self {
+        Self::with_admission_and_diagnostics(admission, false)
+    }
+
+    /// Construct an executor with explicit operator-diagnostic capture. Raw
+    /// upstream stderr is retained only when this flag is true.
+    pub fn with_admission_and_diagnostics(admission: Admission, capture_diagnostics: bool) -> Self {
         Self {
             targets: Arc::new(Mutex::new(HashMap::new())),
             admission,
+            capture_diagnostics,
         }
     }
 }
@@ -164,6 +189,7 @@ struct McpProcess {
     process_group: Pid,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_capture: Option<Arc<StdMutex<Vec<u8>>>>,
     stderr_status: watch::Receiver<StderrStatus>,
     stderr_task: JoinHandle<()>,
 }
@@ -248,7 +274,7 @@ impl McpExecutor {
         let deadline = Duration::from_millis(invocation.limits.timeout_ms);
         let mut shutdown = cancellation.receiver();
         let result = tokio::select! {
-            result = timeout(deadline, actor.call(&invocation)) => result,
+            result = timeout(deadline, actor.call(&invocation, self.capture_diagnostics)) => result,
             _ = wait_for_cancellation(&mut shutdown) => {
                 actor.cancel_and_terminate().await;
                 return Err(RuntimeError::new(
@@ -329,6 +355,7 @@ impl McpSession {
     async fn call(
         &mut self,
         invocation: &ResolvedMcpInvocation,
+        capture_diagnostics: bool,
     ) -> Result<ExecutionResult, McpCallError> {
         if let Some(ready) = self.ready.as_mut()
             && ready
@@ -341,7 +368,7 @@ impl McpSession {
             self.terminate().await;
         }
         if self.ready.is_none() {
-            self.ready = Some(self.negotiate(invocation).await?);
+            self.ready = Some(self.negotiate(invocation, capture_diagnostics).await?);
         }
         let (id, revision, request) = {
             let ready = self.ready.as_mut().expect("negotiation installed process");
@@ -352,6 +379,12 @@ impl McpSession {
                 revision.tool_request(id, &invocation.upstream_tool, &invocation.arguments);
             (id, revision, request)
         };
+        let stderr_start = self
+            .ready
+            .as_ref()
+            .expect("ready process")
+            .process
+            .stderr_len();
         send_message(
             &mut self.ready.as_mut().expect("ready process").process.stdin,
             &request,
@@ -369,19 +402,32 @@ impl McpSession {
         self.active_request = None;
         let reply = reply?;
         let revision = self.ready.as_ref().expect("ready process").revision;
-        adapt_result(
+        let mut result = adapt_result(
             reply,
             invocation.output_kind,
             revision,
             invocation.limits.output_bytes,
-        )
+        )?;
+        if capture_diagnostics {
+            result.observation = Some(TargetObservation {
+                stderr: self
+                    .ready
+                    .as_ref()
+                    .expect("ready process")
+                    .process
+                    .stderr_since(stderr_start),
+                exit: None,
+            });
+        }
+        Ok(result)
     }
 
     async fn negotiate(
         &mut self,
         invocation: &ResolvedMcpInvocation,
+        capture_diagnostics: bool,
     ) -> Result<ReadyProcess, McpCallError> {
-        self.starting = Some(spawn_process(invocation).await?);
+        self.starting = Some(spawn_process(invocation, capture_diagnostics).await?);
         let discover_id = 1;
         let discover =
             json!({"jsonrpc":"2.0","id":discover_id,"method":"server/discover","params":{}});
@@ -402,7 +448,7 @@ impl McpSession {
             Ok(_) | Err(McpCallError::RemoteError) => self.legacy_initialize(invocation, 2).await,
             Err(McpCallError::ConnectionClosed) => {
                 self.terminate_starting().await;
-                self.starting = Some(spawn_process(invocation).await?);
+                self.starting = Some(spawn_process(invocation, capture_diagnostics).await?);
                 self.legacy_initialize(invocation, 1).await
             }
             Err(error) => {
@@ -510,7 +556,10 @@ impl Revision {
     }
 }
 
-async fn spawn_process(invocation: &ResolvedMcpInvocation) -> Result<McpProcess, McpCallError> {
+async fn spawn_process(
+    invocation: &ResolvedMcpInvocation,
+    capture_diagnostics: bool,
+) -> Result<McpProcess, McpCallError> {
     let mut command = Command::new(&invocation.command);
     command
         .args(&invocation.args)
@@ -581,6 +630,8 @@ async fn spawn_process(invocation: &ResolvedMcpInvocation) -> Result<McpProcess,
         }
     };
     let (status_tx, status_rx) = watch::channel(StderrStatus::Draining);
+    let stderr_capture = capture_diagnostics.then(|| Arc::new(StdMutex::new(Vec::new())));
+    let stderr_capture_task = stderr_capture.clone();
     let stderr_limit = invocation.limits.stderr_bytes;
     let stderr_task = tokio::spawn(async move {
         let mut reader = stderr;
@@ -598,6 +649,14 @@ async fn spawn_process(invocation: &ResolvedMcpInvocation) -> Result<McpProcess,
                         let _ = status_tx.send(StderrStatus::Overflow);
                         return;
                     }
+                    if let Some(capture) = &stderr_capture_task {
+                        if let Ok(mut capture) = capture.lock() {
+                            capture.extend_from_slice(&chunk[..n]);
+                        } else {
+                            let _ = status_tx.send(StderrStatus::Failed);
+                            return;
+                        }
+                    }
                 }
                 Err(_) => {
                     let _ = status_tx.send(StderrStatus::Failed);
@@ -612,9 +671,31 @@ async fn spawn_process(invocation: &ResolvedMcpInvocation) -> Result<McpProcess,
         process_group,
         stdin,
         stdout: BufReader::new(stdout),
+        stderr_capture,
         stderr_status: status_rx,
         stderr_task,
     })
+}
+
+impl McpProcess {
+    fn stderr_len(&self) -> usize {
+        self.stderr_capture
+            .as_ref()
+            .and_then(|capture| capture.lock().ok().map(|value| value.len()))
+            .unwrap_or(0)
+    }
+
+    fn stderr_since(&self, start: usize) -> Vec<u8> {
+        self.stderr_capture
+            .as_ref()
+            .and_then(|capture| {
+                capture
+                    .lock()
+                    .ok()
+                    .map(|value| value.get(start..).unwrap_or_default().to_vec())
+            })
+            .unwrap_or_default()
+    }
 }
 
 async fn terminate_process(process: McpProcess) {
@@ -839,6 +920,7 @@ fn adapt_result(
             text: None,
             text_blocks: Vec::new(),
             structured: None,
+            observation: None,
         });
     }
     Ok(ExecutionResult {
@@ -847,6 +929,7 @@ fn adapt_result(
         text: (!text_blocks.is_empty()).then_some(text),
         text_blocks,
         structured,
+        observation: None,
     })
 }
 
@@ -900,7 +983,11 @@ fn bounded_json(value: Value, depth: usize) -> Result<Value, McpCallError> {
 
 impl RuntimeError {
     fn new(code: BrokerErrorCode, message: &'static str) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            observation: None,
+        }
     }
 }
 
@@ -928,6 +1015,23 @@ pub async fn execute_cli_with_admission_and_cancellation(
     admission: &Admission,
     cancellation: &Cancellation,
 ) -> Result<ExecutionResult, RuntimeError> {
+    execute_cli_with_admission_and_cancellation_and_diagnostics(
+        invocation,
+        admission,
+        cancellation,
+        false,
+    )
+    .await
+}
+
+/// Execute a CLI invocation with explicit operator-diagnostic capture. Raw
+/// target stderr is retained only when `capture_diagnostics` is true.
+pub async fn execute_cli_with_admission_and_cancellation_and_diagnostics(
+    invocation: ResolvedCliInvocation,
+    admission: &Admission,
+    cancellation: &Cancellation,
+    capture_diagnostics: bool,
+) -> Result<ExecutionResult, RuntimeError> {
     if cancellation.is_cancelled() {
         return Err(RuntimeError::new(
             BrokerErrorCode::Cancelled,
@@ -935,12 +1039,13 @@ pub async fn execute_cli_with_admission_and_cancellation(
         ));
     }
     let _admission = admission.try_acquire()?;
-    execute_cli_inner(invocation, cancellation).await
+    execute_cli_inner(invocation, cancellation, capture_diagnostics).await
 }
 
 async fn execute_cli_inner(
     invocation: ResolvedCliInvocation,
     cancellation: &Cancellation,
+    capture_diagnostics: bool,
 ) -> Result<ExecutionResult, RuntimeError> {
     let mut command = Command::new(&invocation.executable);
     command
@@ -999,10 +1104,10 @@ async fn execute_cli_inner(
     let stdout_limit = invocation.limits.stdout_bytes;
     let stderr_limit = invocation.limits.stderr_bytes;
     let mut stdout_task = Some(tokio::spawn(async move {
-        read_bounded(&mut stdout, stdout_limit).await
+        read_bounded(&mut stdout, stdout_limit, true).await
     }));
     let mut stderr_task = Some(tokio::spawn(async move {
-        read_bounded(&mut stderr, stderr_limit).await
+        read_bounded(&mut stderr, stderr_limit, capture_diagnostics).await
     }));
     let deadline =
         tokio::time::Instant::now() + Duration::from_millis(invocation.limits.timeout_ms);
@@ -1074,7 +1179,7 @@ async fn execute_cli_inner(
     let stdout = stdout_result
         .expect("stdout result exists")
         .map_err(|error| reader_error(&error))?;
-    let _stderr = stderr_result
+    let stderr_bytes = stderr_result
         .expect("stderr result exists")
         .map_err(|error| reader_error(&error))?;
     let success = status.success();
@@ -1085,6 +1190,10 @@ async fn execute_cli_inner(
             text: None,
             text_blocks: Vec::new(),
             structured: None,
+            observation: capture_diagnostics.then(|| TargetObservation {
+                stderr: stderr_bytes,
+                exit: Some(target_exit(&status)),
+            }),
         });
     }
     match invocation.output_kind {
@@ -1101,6 +1210,10 @@ async fn execute_cli_inner(
                 text: Some(text.clone()),
                 text_blocks: vec![text],
                 structured: None,
+                observation: capture_diagnostics.then(|| TargetObservation {
+                    stderr: stderr_bytes,
+                    exit: Some(target_exit(&status)),
+                }),
             })
         }
         OutputKind::Json => {
@@ -1129,6 +1242,10 @@ async fn execute_cli_inner(
                 text: Some(text.clone()),
                 text_blocks: vec![text],
                 structured: Some(value),
+                observation: capture_diagnostics.then(|| TargetObservation {
+                    stderr: stderr_bytes,
+                    exit: Some(target_exit(&status)),
+                }),
             })
         }
         OutputKind::Structured => Err(RuntimeError::new(
@@ -1136,6 +1253,17 @@ async fn execute_cli_inner(
             "CLI targets do not support structured upstream output",
         )),
     }
+}
+
+fn target_exit(status: &ExitStatus) -> TargetExit {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return TargetExit::Signal(signal);
+        }
+    }
+    TargetExit::Code(status.code().unwrap_or(-1))
 }
 
 #[derive(Debug)]
@@ -1206,18 +1334,23 @@ async fn terminate_cli_process(child: &mut Child, _process_group: ()) {
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     limit: usize,
+    capture: bool,
 ) -> Result<Vec<u8>, ReadError> {
     let mut bytes = Vec::new();
+    let mut total = 0usize;
     let mut chunk = [0_u8; 8192];
     loop {
         let read = reader.read(&mut chunk).await.map_err(|_| ReadError::Io)?;
         if read == 0 {
             return Ok(bytes);
         }
-        if bytes.len().saturating_add(read) > limit {
+        total = total.saturating_add(read);
+        if total > limit {
             return Err(ReadError::LimitExceeded);
         }
-        bytes.extend_from_slice(&chunk[..read]);
+        if capture {
+            bytes.extend_from_slice(&chunk[..read]);
+        }
     }
 }
 

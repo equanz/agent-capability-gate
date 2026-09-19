@@ -120,7 +120,7 @@ id = "P17"
 kind = "review"
 status = "review"
 references = ["crates/runtime/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/tests/process_limit_e2e.rs"]
-criterion = "Review all broker-generated errors and diagnostics for secret-free content; target stderr must not be forwarded raw, and the CLI sentinel test must be extended or complemented for every broker error path."
+criterion = "Review all broker-generated errors and normal diagnostics for secret-free content; target stderr must not enter MCP stdout or normal diagnostics, while explicit MCP_BOUNDARY_LOG=debug may expose bounded target stderr only in the documented operator event."
 
 [[requirement]]
 id = "P18"
@@ -169,7 +169,7 @@ id = "E04"
 kind = "review"
 status = "review"
 references = ["crates/runtime/src/lib.rs", "crates/boundary/tests/process_limit_e2e.rs", "crates/boundary/tests/cli_e2e.rs"]
-criterion = "The process-limit E2E covers bounded text/JSON, deterministic compact JSON, nonzero termination, invalid JSON, output overflow, and no raw stderr; review signal termination and any remaining E04 result-adaptation paths."
+criterion = "The process-limit E2E covers bounded text/JSON, deterministic compact JSON, nonzero termination, invalid JSON, output overflow, and no raw stderr in normal results; review signal termination and any remaining E04 result-adaptation paths."
 
 [[requirement]]
 id = "E05"
@@ -246,7 +246,7 @@ id = "E15"
 kind = "review"
 status = "review"
 references = ["crates/runtime/src/lib.rs", "crates/boundary/src/main.rs", "crates/boundary/tests/process_limit_e2e.rs"]
-criterion = "Review environment and every target-error diagnostic path to ensure credential sentinels never enter broker output or stderr; the CLI sentinel test does not cover all MCP error paths."
+criterion = "Review environment and every target-error path to ensure credential sentinels never enter MCP stdout or normal diagnostics; debug target stderr is an explicit operator-only disclosure and is covered for CLI and upstream MCP."
 
 [[requirement]]
 id = "E16"

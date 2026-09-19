@@ -7,8 +7,8 @@ use mcp_boundary_core::{
     tools_json,
 };
 use mcp_boundary_runtime::{
-    Admission, Cancellation, ExecutionResult, McpExecutor, RuntimeError,
-    execute_cli_with_admission_and_cancellation,
+    Admission, Cancellation, ExecutionResult, McpExecutor, RuntimeError, TargetExit,
+    TargetObservation, execute_cli_with_admission_and_cancellation_and_diagnostics,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -70,9 +70,9 @@ struct LoadedConfig {
     config: ValidatedConfig,
 }
 
-/// Opt-in operator diagnostics for completed public tool calls.  The logger
-/// deliberately owns only stable, configuration-derived labels: request
-/// arguments and target output never cross this boundary.
+/// Opt-in operator diagnostics for completed public tool calls. Target stderr
+/// is deliberately kept behind this explicit operator boundary and is never
+/// written to the MCP stdout wire.
 #[derive(Clone)]
 struct DebugLogger {
     enabled: bool,
@@ -97,6 +97,7 @@ impl DebugLogger {
             target: target.map(str::to_owned),
             outcome: "rejected",
             code: Some("INVALID_ARGUMENTS"),
+            observation: None,
             finished: false,
         }
     }
@@ -109,6 +110,7 @@ impl DebugLogger {
             target: None,
             outcome: "rejected",
             code: Some("INVALID_ARGUMENTS"),
+            observation: None,
             finished: true,
         }
     }
@@ -134,6 +136,22 @@ impl DebugLogger {
         if let Some(code) = call.code {
             event.insert("code".to_owned(), Value::String(code.to_owned()));
         }
+        if let Some(observation) = &call.observation {
+            if !observation.stderr.is_empty() {
+                let (encoding, value) = diagnostic_bytes(&observation.stderr);
+                event.insert(
+                    "target_stderr".to_owned(),
+                    json!({"encoding": encoding, "value": value}),
+                );
+            }
+            if let Some(exit) = observation.exit {
+                let exit = match exit {
+                    TargetExit::Code(code) => json!({"code": code}),
+                    TargetExit::Signal(signal) => json!({"signal": signal}),
+                };
+                event.insert("target_exit".to_owned(), exit);
+            }
+        }
         let Ok(line) = serde_json::to_vec(&Value::Object(event)) else {
             return;
         };
@@ -153,25 +171,33 @@ struct DebugCall {
     target: Option<String>,
     outcome: &'static str,
     code: Option<&'static str>,
+    observation: Option<TargetObservation>,
     finished: bool,
 }
 
 impl DebugCall {
-    fn success(&mut self) {
+    fn success_with_observation(&mut self, observation: Option<TargetObservation>) {
         self.outcome = "success";
         self.code = None;
+        self.observation = observation;
         self.finish();
     }
 
-    fn error(&mut self, code: BrokerErrorCode) {
+    fn error_with_observation(
+        &mut self,
+        code: BrokerErrorCode,
+        observation: Option<TargetObservation>,
+    ) {
         self.outcome = "error";
         self.code = Some(code.as_str());
+        self.observation = observation;
         self.finish();
     }
 
     fn rejected(&mut self, code: BrokerErrorCode) {
         self.outcome = "rejected";
         self.code = Some(code.as_str());
+        self.observation = None;
         self.finish();
     }
 
@@ -186,6 +212,20 @@ impl DebugCall {
 impl Drop for DebugCall {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+fn diagnostic_bytes(bytes: &[u8]) -> (&'static str, String) {
+    match std::str::from_utf8(bytes) {
+        Ok(value) => ("utf8", value.to_owned()),
+        Err(_) => {
+            let mut value = String::with_capacity(bytes.len().saturating_mul(2));
+            for byte in bytes {
+                use std::fmt::Write as _;
+                let _ = write!(value, "{byte:02x}");
+            }
+            ("hex", value)
+        }
     }
 }
 
@@ -382,7 +422,7 @@ async fn serve_stdio(loaded: LoadedConfig) -> Result<(), Diagnostic> {
     let debug = DebugLogger::from_environment();
     let admission = Admission::new();
     let cancellation = Cancellation::new();
-    let mcp = McpExecutor::with_admission(admission.clone());
+    let mcp = McpExecutor::with_admission_and_diagnostics(admission.clone(), debug.enabled);
     let revision = Arc::new(AsyncMutex::new(PublicRevision::Legacy));
     let mut tasks = Vec::new();
     let mut stdin = BufReader::new(tokio::io::stdin());
@@ -877,14 +917,18 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                     Ok(execution) => match execution.await {
                         Ok(result) => {
                             if result.is_error {
-                                debug_call.error(result.code);
+                                debug_call.error_with_observation(
+                                    result.code,
+                                    result.observation.clone(),
+                                );
                             } else {
-                                debug_call.success();
+                                debug_call.success_with_observation(result.observation.clone());
                             }
                             write_execution(&stdout, id, result, *revision.lock().await).await?
                         }
                         Err(error) => {
-                            debug_call.error(error.code);
+                            debug_call
+                                .error_with_observation(error.code, error.observation.clone());
                             write_runtime_error_async(&stdout, id, error, *revision.lock().await)
                                 .await?
                         }
@@ -903,23 +947,28 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                 }
             } else {
                 match resolve_cli_then_execute(&config, name, &arguments, |invocation| {
-                    execute_cli_with_admission_and_cancellation(
+                    execute_cli_with_admission_and_cancellation_and_diagnostics(
                         invocation,
                         &admission,
                         &cancellation,
+                        debug.enabled,
                     )
                 }) {
                     Ok(execution) => match execution.await {
                         Ok(result) => {
                             if result.is_error {
-                                debug_call.error(result.code);
+                                debug_call.error_with_observation(
+                                    result.code,
+                                    result.observation.clone(),
+                                );
                             } else {
-                                debug_call.success();
+                                debug_call.success_with_observation(result.observation.clone());
                             }
                             write_execution(&stdout, id, result, *revision.lock().await).await?
                         }
                         Err(error) => {
-                            debug_call.error(error.code);
+                            debug_call
+                                .error_with_observation(error.code, error.observation.clone());
                             write_runtime_error_async(&stdout, id, error, *revision.lock().await)
                                 .await?
                         }

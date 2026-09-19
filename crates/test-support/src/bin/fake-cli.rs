@@ -57,6 +57,7 @@ fn main() {
         argument == "--invalid-json"
             || argument.starts_with("--text=")
             || argument.starts_with("--stdout-bytes=")
+            || argument.starts_with("--stderr-hex=")
     });
     if arguments
         .iter()
@@ -89,6 +90,22 @@ fn main() {
             .and_then(|value| value.parse::<usize>().ok())
     }) {
         eprint!("{}", "e".repeat(bytes));
+    }
+    if let Some(encoded) = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("--stderr-hex="))
+    {
+        let mut bytes = Vec::with_capacity(encoded.len() / 2);
+        for pair in encoded.as_bytes().chunks(2) {
+            if let Ok(pair) = std::str::from_utf8(pair)
+                && let Ok(byte) = u8::from_str_radix(pair, 16)
+            {
+                bytes.push(byte);
+            }
+        }
+        io::stderr()
+            .write_all(&bytes)
+            .expect("write fixture stderr bytes");
     }
     if let Some(code) = arguments.iter().find_map(|argument| {
         argument

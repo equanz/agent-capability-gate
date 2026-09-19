@@ -274,7 +274,7 @@ wire分類は次で固定する。
 | `INVALID_ARGUMENTS`、`POLICY_DENIED` | target未起動の`isError: true` tool result |
 | target unavailable、timeout、failure、output failure、cancellation | `isError: true` tool result |
 
-外部resultとstderr診断は`stable_code`ごとの固定templateから作り、`private_cause`の`Display`や`Debug`を連結しない。target ID、公開property path、OS error kind、およびcorrelation IDは出せるが、executable、cwd、argv、environment value、upstream arguments、およびraw target outputは出さない。
+外部resultと通常のstderr診断は`stable_code`ごとの固定templateから作り、`private_cause`の`Display`や`Debug`を連結しない。target ID、公開property path、OS error kind、およびcorrelation IDは出せるが、executable、cwd、argv、environment value、upstream arguments、およびraw target outputは出さない。`MCP_BOUNDARY_LOG=debug`の明示時だけ、target stderrを`target_stderr`（妥当なUTF-8は`utf8`、その他は`hex`）としてoperator向け完了eventへ含め、終了状態を`target_exit`へ含める。このeventはstdoutやMCP resultへ転送しない。
 
 全environment valueをsecretとして扱う。固定argvとupstream literalはcredentialではない前提だが、通常errorへ表示しない。target自身が成功または失敗contentへsecretを出した場合の検出はMVPの保証外である。
 

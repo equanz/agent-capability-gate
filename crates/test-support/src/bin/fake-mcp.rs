@@ -11,6 +11,8 @@ fn main() {
     let mode = env::args().nth(1).unwrap_or_else(|| "legacy".into());
     let marker =
         env::args().find_map(|argument| argument.strip_prefix("--marker=").map(str::to_owned));
+    let stderr_marker =
+        env::args().find_map(|argument| argument.strip_prefix("--stderr=").map(str::to_owned));
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout());
     let mut call_number = 0usize;
@@ -25,6 +27,10 @@ fn main() {
             // notifications/initialized have no response.
             continue;
         };
+        if let Some(stderr_marker) = stderr_marker.as_deref() {
+            eprint!("{stderr_marker}");
+            let _ = io::stderr().flush();
+        }
         if mode == "protocol-error" {
             // Deliberately violate JSON-lines framing. The broker must map
             // this to a stable protocol failure and never expose the bytes.

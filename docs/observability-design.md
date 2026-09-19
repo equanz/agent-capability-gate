@@ -25,15 +25,18 @@ debug を有効にした broker は、公開 `tools/call` ごとに一つの完�
 
 ## 情報境界
 
-debug は機密情報を開示する opt-in ではない。event と通常の stderr diagnostic は、executable、cwd、argv、environment value、公開 input、upstream arguments、target stdout、target stderr、および `private_cause` を含めない。
+通常の stderr diagnostic と MCP response は、executable、cwd、argv、environment value、公開 input、upstream arguments、および target stdout/stderr を含めない。debug は operator が明示的に開く診断境界であり、target stderr を event に含める。したがって、debug の stderr は秘密を含み得る一時的な operator 出力として扱い、通常ログや MCP client へ転送してはならない。
 
-target の非0 exit、timeout、起動不能、I/O failure、出力上限、出力不正、cancellation は stable code で識別する。target stderr の本文から原因を調査する必要が生じた場合は、保存主体、アクセス制御、保持期間、および secret の扱いを別途設計するまで、本機能の範囲外とする。
+target stderr は `target_stderr: {"encoding":"utf8|hex","value":"..."}` として表現する。UTF-8 として妥当な bytes は `utf8` の JSON string にし、妥当でない bytes は `hex` の小文字 hexadecimal にする。これにより JSONL を壊さず、任意の bytes を失わずに扱える。target の終了状態は `target_exit: {"code": N}` または `target_exit: {"signal": N}` とする。upstream MCP のように process が継続する場合は終了状態を省略し、call 間に収集した stderr だけを載せる。
+
+target の非0 exit、timeout、起動不能、I/O failure、出力上限、出力不正、cancellation は stable code で識別する。stderr は configured limit 内だけを保持し、limit 超過時は raw bytes を debug event に出さない。
 
 ## 受入条件
 
 - debug 無効時、正常・失敗・拒否の tool call は stdout に正しい MCP response だけを出し、call event を stderr に出さない。
-- debug 有効時、各 tool call は parse 可能な一つの JSON event を出し、結果種別と stable code が MCP response と矛盾しない。
-- target が出す secret sentinel、入力、環境値、および生の stderr は、debug event、通常 diagnostic、MCP response のいずれにも現れない。
+- debug 有効時、各 tool call は parse 可能な一つの JSON event を出し、結果種別と stable code が MCP response と矛盾しない。target が stderr を出した場合、event は上記の encoding でそれを含める。
+- debug 無効時、target が出す secret sentinel、入力、環境値、および生の stderr は debug event、通常 diagnostic、MCP response のいずれにも現れない。
+- debug 有効時も、target stderr は stdout または MCP response に現れず、event の `target_stderr` にだけ現れる。任意の bytes は JSONL を壊さず復元可能である。
 - 既存の設定失敗と致命的 shutdown の stderr diagnostic は維持する。
 
 ## 再検討条件

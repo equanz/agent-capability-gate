@@ -402,7 +402,7 @@ modern client には `server/discover` と request ごとの metadata に基づ�
 
 MCP annotation は client の表示や承認判断を助けるために設定から転記するが、server の認可判断には使わない。設定で指定していない upstream annotation は継承しない。
 
-MVP の CLI output は UTF-8 text または stdout 全体が一つの JSON value である structured output とする。`output.kind: text`はstdoutを変更せず一つのtext content blockへ入れる。`output.kind: json`はstdout全体をparseし、structured contentへ入れるとともに、同じ値を決定的なcompact JSONへserializeした一つのtext content blockをlegacy互換のために返す。compact JSONはobject keyをUTF-8 byte列の昇順へ再帰的に並べ、不要な空白を持たず、数値をparse済みの同じ値へround-tripする最短表記にする。stdout と stderr は結合しない。exit code 0 だけを成功とする。stderrはprocess制御とoperator診断のために上限内で収集するが、targetが返した生のstderrをtool resultまたはbroker生成診断へ含めない。
+MVP の CLI output は UTF-8 text または stdout 全体が一つの JSON value である structured output とする。`output.kind: text`はstdoutを変更せず一つのtext content blockへ入れる。`output.kind: json`はstdout全体をparseし、structured contentへ入れるとともに、同じ値を決定的なcompact JSONへserializeした一つのtext content blockをlegacy互換のために返す。compact JSONはobject keyをUTF-8 byte列の昇順へ再帰的に並べ、不要な空白を持たず、数値をparse済みの同じ値へround-tripする最短表記にする。stdout と stderr は結合しない。exit code 0 だけを成功とする。stderrはprocess制御とoperator診断のために上限内で収集する。通常はtargetが返した生のstderrをtool resultまたはbroker生成診断へ含めないが、`MCP_BOUNDARY_LOG=debug`時のoperator eventには安全な`utf8`/`hex`表現で含める。
 
 MVP の upstream MCP output は text content と JSON の structured content だけを中継する。MCP targetの`output.kind: text`は一つ以上のtext contentだけを許し、structured contentを許さない。`output.kind: structured`はstructured contentを必須とし、互換用のtext contentを併存できる。CLI targetでは`text`と`json`、MCP targetでは`text`と`structured`だけを設定採用時に受理する。image、audio、resource link、および embedded resource は未対応として拒否する。対応形式を増やす場合も、形式ごとの size、URI、および content validation を先に定義する。
 
