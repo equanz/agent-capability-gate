@@ -13,6 +13,21 @@ Before writing YAML, state the capability in one sentence: target operation, per
 
 Make a compact authority table for every input and fixed value. Classify each item as command/subcommand, option name, option value, scope, identity/credential selector, path/URL/config selector, or payload. Ask for a decision when the intended authority is not fixed enough to classify; do not silently choose it.
 
+## Design the deployment boundary
+
+Identify the coding agent and its actual execution surface: local host, remote workspace, container, or hosted runner. Consult the current documentation and effective sandbox or managed policy for that agent. A repository setting is evidence only if the agent and its child processes cannot modify or bypass it.
+
+For the broker executable, capability config, MCP registration or launcher, target executable or upstream server, and credentials, record the concrete location or owner and whether the administrator, broker process, agent, and agent-started child processes can read, write, execute, replace, or invoke it. Check parent directories and symlink targets as well as the file itself.
+
+Require both of these properties:
+
+- the agent and its child processes cannot modify the broker, config, registration, target, or credential source; and
+- the agent cannot invoke the target or upstream directly with the broker's identity or credentials, bypassing the published MCP tools.
+
+Placement outside the workspace is not sufficient when the same OS identity can change permissions, replace a parent-directory entry, or invoke the target directly. Prefer administrator-owned installation paths and config directories outside every agent-writable root only when the effective sandbox enforces that separation. On a managed macOS host, `/usr/local/libexec/mcp-boundary/mcp-boundary` and `/Library/Application Support/mcp-boundary/<instance>/config.yaml` are reasonable candidates; on a managed Linux host, use an administrator-owned executable under `/usr/local/libexec` and config under `/etc/mcp-boundary`. Treat these as proposals to verify, not intrinsically safe paths.
+
+If the coding agent lacks an enforceable filesystem and process boundary, place the broker and credentials under a separate OS identity, service, container, VM, or host and expose only the MCP interface. If the available transport or agent integration cannot preserve that separation, report the deployment as blocked instead of presenting a same-user read-only file as a security boundary. Keep secrets out of the capability config where possible; when the config contains a secret, the agent must lack read access as well as write access.
+
 ## Evaluate two separate boundaries
 
 The product structurally enforces a fixed absolute executable, fixed cwd and environment, closed schemas, explicit bindings, and no shell command string. A scalar input remains one `argv` element and cannot create a new binding node; a declared `each` binding intentionally emits one element per array item. These properties do **not** establish what the target will do with an accepted argv element or array.
@@ -63,9 +78,10 @@ Report the scenarios with their expected schema rejection or the exact reviewed 
 Return:
 
 1. the authority statement and authority table;
-2. for an acceptable design, the config and non-mutating validation results; for a blocked design, a narrower redesign without an installable unsafe config;
-3. the target-semantics evidence or unresolved blocker;
-4. adversarial scenarios and expected outcomes; and
-5. residual authority: everything the selected target, identity, credentials, fixed literals, and accepted input can still do.
+2. the coding-agent-specific deployment table, proposed concrete locations, and evidence that direct invocation and modification are denied;
+3. for an acceptable design, the config and non-mutating validation results; for a blocked design, a narrower redesign without an installable unsafe config;
+4. the target-semantics evidence or unresolved blocker;
+5. adversarial scenarios and expected outcomes; and
+6. residual authority: everything the selected target, identity, credentials, fixed literals, accepted input, and deployment identity can still do.
 
 End with the limits of this review. A valid config and passing `check`/`tools` output establish only the product's configuration boundary; target behavior, administrator authority, binary replacement, and output content remain outside that proof.

@@ -81,9 +81,13 @@ LLM とその生成した引数は非信頼とする。target は設定で選択
 
 設定を変更できる主体は、本システムが公開する全能力を変更できる管理者である。server process の実行 user、OS kernel、および設定で指定した executable を置換できる主体も同等に信頼する。本システムは、host の管理権限を奪取した攻撃者、差し替えられた target binary、または設定外の経路から直接呼ばれた upstream を封じ込めない。
 
+通常利用の導入では、broker executable、capability設定、MCP起動登録、target executable、およびcredentialを、LLMとそこから起動できるprocessの変更権限から外す。workspace外への配置だけではこの条件を満たさない。同じOS identityが親directoryの変更、権限変更、symlinkの差し替え、または同じcredentialによるtargetの直接実行を行える場合、そのidentityは境界の管理者である。coding agentのsandboxがこれらを強制できない場合は、brokerを別のOS identity、service、container、またはhostで実行し、agentには公開MCP interfaceだけを渡す。
+
+配置と起動方式は利用するcoding agentの実効sandboxに合わせて決める。project内の設定宣言だけを根拠にせず、agent本体とそのchild processについて、各artifactとcredentialのread、write、execute、および直接到達性を導入時に確認する。設定に秘密値を含める場合は、変更防止だけでなくLLMからの読み取り防止も必要である。
+
 upstream MCP に credential を渡す場合、その upstream は credential が持つ権限を行使できる。本システムが狭めるのは LLM から到達できる呼び出し面であり、upstream 自身の実装権限ではない。MVP は target の返却内容を property 単位で成形しないため、target が返した機密情報の公開を一般には防止できない。管理者は、返却内容を信頼できる target と tool だけを公開する。
 
-通常利用ではbrokerをCodexのMCP server設定へ登録し、その起動contextがbrokerとtargetのOS権限を決める。自律開発用のouter sandboxは実装とmock検証を閉じ込めるための別境界であり、通常利用時のtargetを同じsandboxへ閉じ込める製品機能ではない。本システムは両者を同一の安全性保証として扱わない。
+通常利用ではbrokerをcoding agentのMCP server設定へ登録し、その起動contextがbrokerとtargetのOS権限を決める。自律開発用のouter sandboxは実装とmock検証を閉じ込めるための別境界であり、通常利用時のtargetを同じsandboxへ閉じ込める製品機能ではない。本システムは両者を同一の安全性保証として扱わない。
 
 ## E2E の振る舞い
 
