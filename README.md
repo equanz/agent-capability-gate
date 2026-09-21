@@ -24,6 +24,12 @@ Rust 1.98.1 is pinned for this repository. From a source checkout:
 cargo install --locked --offline --path crates/boundary --bin mcp-boundary
 ```
 
+This installs `mcp-boundary` to `~/.cargo/bin` by default (or `$CARGO_HOME/bin` when `CARGO_HOME` is set). Remove it with:
+
+```sh
+cargo uninstall mcp-boundary
+```
+
 ## CLI example
 
 Turn `git` into one capability: read a bounded number of recent commits from one fixed repository. Create `/absolute/path/git-history.yaml` and adjust the administrator-owned repository path:
@@ -80,7 +86,13 @@ When authoring a boundary for a real target, use the included [capability-config
 
 ## Upstream MCP example
 
-The MCP reference Time server itself needs no credential, external network, or writable data source. The quickest launch path is `uvx mcp-server-time`; set `command` to the absolute output of `command -v uvx`:
+Install the MCP reference Time server once under the administrator identity that owns the broker:
+
+```sh
+uv tool install mcp-server-time
+```
+
+Set `command` to the absolute output of `command -v mcp-server-time`:
 
 ```yaml
 version: 1
@@ -94,8 +106,8 @@ targets:
     kind: mcp
     transport:
       kind: stdio
-      command: /absolute/path/to/uvx
-      args: [mcp-server-time] # Launch Time, not a caller-selected server.
+      command: /absolute/path/to/mcp-server-time # Fixed installed upstream server.
+      args: []
       cwd: /
     limits:
       timeout_ms: 5000
@@ -119,7 +131,7 @@ tools:
     output: { kind: text }
 ```
 
-The upstream server may provide other tools and timezone inputs; they are not published by this configuration. `uvx` may download or update the package on launch. For a durable boundary, install and pin it first, then replace `command` with the absolute `mcp-server-time` executable and use `args: []`.
+The upstream server may provide other tools and timezone inputs; they are not published by this configuration. Install or upgrade the upstream package outside the agent's authority, then validate the broker configuration before registering it.
 
 ## Run
 
