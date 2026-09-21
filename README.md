@@ -1,10 +1,14 @@
 # MCP Capability Boundary
 
-Give coding agents the operations they need without giving them unrestricted CLI/MCP access or readable credentials.
+You can tell a coding agent “use only this namespace” or “work only in this project.” But a broad CLI or MCP tool still lets it choose every namespace, project, and option. Direct CLI access may also require giving the agent a credential it can read and reuse. Prompts and command rules do not turn either problem into a mechanical boundary.
 
-- Turn a narrow slice of an existing CLI or MCP server into a typed MCP tool.
-- Enforce allowed inputs and exact argument positions mechanically, not with prompts.
-- Keep executables, fixed arguments, environments, and credentials under administrator control.
+MCP Capability Boundary turns one reviewed operation into the only interface an agent receives.
+
+- Expose a narrow slice of an existing CLI or MCP server as a typed MCP tool.
+- Fix the operation, scope, arguments, environment, and credential authority under administrator control.
+- Accept only a closed input schema and resolve it to exact CLI or MCP arguments—never a shell command string.
+
+Read the [user guide](docs/usage.md) for the threat model, deployment boundary, configuration model, and constraints.
 
 ```mermaid
 flowchart LR
