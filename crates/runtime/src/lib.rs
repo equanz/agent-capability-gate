@@ -164,6 +164,7 @@ struct McpSession {
     ready: Option<ReadyProcess>,
     starting: Option<McpProcess>,
     active_request: Option<ActiveRequest>,
+    pending_observation: Option<TargetObservation>,
 }
 
 struct ReadyProcess {
@@ -263,6 +264,7 @@ impl McpExecutor {
                             ready: None,
                             starting: None,
                             active_request: None,
+                            pending_observation: None,
                         }),
                     })
                 })
@@ -286,8 +288,19 @@ impl McpExecutor {
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => {
-                actor.terminate().await;
-                Err(match error {
+                let mut observation = actor
+                    .pending_observation
+                    .take()
+                    .or_else(|| actor.diagnostic_observation(self.capture_diagnostics));
+                if actor.ready.is_some() || actor.starting.is_some() {
+                    let terminated_observation = actor
+                        .terminate_with_observation(self.capture_diagnostics)
+                        .await;
+                    if terminated_observation.is_some() {
+                        observation = terminated_observation;
+                    }
+                }
+                let mut runtime_error = match error {
                     McpCallError::Runtime(value) => value,
                     McpCallError::StderrOverflow => RuntimeError::new(
                         BrokerErrorCode::OutputLimitExceeded,
@@ -317,7 +330,11 @@ impl McpExecutor {
                         BrokerErrorCode::OutputLimitExceeded,
                         "upstream message exceeded configured limit",
                     ),
-                })
+                };
+                if runtime_error.observation.is_none() {
+                    runtime_error.observation = observation;
+                }
+                Err(runtime_error)
             }
             Err(_) => {
                 actor.cancel_and_terminate().await;
@@ -352,11 +369,31 @@ async fn wait_for_cancellation(signal: &mut watch::Receiver<bool>) {
 }
 
 impl McpSession {
+    fn diagnostic_observation(&mut self, capture_diagnostics: bool) -> Option<TargetObservation> {
+        if !capture_diagnostics {
+            return None;
+        }
+        let process = match (&mut self.ready, &mut self.starting) {
+            (Some(ready), _) => &mut ready.process,
+            (None, Some(starting)) => starting,
+            (None, None) => return None,
+        };
+        let stderr = process.stderr_since(0);
+        let exit = process
+            .child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| target_exit(&status));
+        Some(TargetObservation { stderr, exit })
+    }
+
     async fn call(
         &mut self,
         invocation: &ResolvedMcpInvocation,
         capture_diagnostics: bool,
     ) -> Result<ExecutionResult, McpCallError> {
+        self.pending_observation = None;
         if let Some(ready) = self.ready.as_mut()
             && ready
                 .process
@@ -369,6 +406,10 @@ impl McpSession {
         }
         if self.ready.is_none() {
             self.ready = Some(self.negotiate(invocation, capture_diagnostics).await?);
+            // A discovery failure may be retried with legacy initialization.
+            // Do not carry that retry's observation into a later call after
+            // negotiation has succeeded.
+            self.pending_observation = None;
         }
         let (id, revision, request) = {
             let ready = self.ready.as_mut().expect("negotiation installed process");
@@ -445,14 +486,18 @@ impl McpSession {
                 revision: Revision::Modern,
                 next_id: 2,
             }),
-            Ok(_) | Err(McpCallError::RemoteError) => self.legacy_initialize(invocation, 2).await,
+            Ok(_) | Err(McpCallError::RemoteError) => {
+                self.legacy_initialize(invocation, 2, capture_diagnostics)
+                    .await
+            }
             Err(McpCallError::ConnectionClosed) => {
-                self.terminate_starting().await;
+                self.remember_terminated_starting(capture_diagnostics).await;
                 self.starting = Some(spawn_process(invocation, capture_diagnostics).await?);
-                self.legacy_initialize(invocation, 1).await
+                self.legacy_initialize(invocation, 1, capture_diagnostics)
+                    .await
             }
             Err(error) => {
-                self.terminate_starting().await;
+                self.remember_terminated_starting(capture_diagnostics).await;
                 Err(error)
             }
         }
@@ -462,6 +507,7 @@ impl McpSession {
         &mut self,
         _invocation: &ResolvedMcpInvocation,
         id: u64,
+        capture_diagnostics: bool,
     ) -> Result<ReadyProcess, McpCallError> {
         let initialize = json!({
             "jsonrpc":"2.0", "id":id, "method":"initialize",
@@ -481,12 +527,12 @@ impl McpSession {
         let reply = match reply {
             Ok(reply) => reply,
             Err(error) => {
-                self.terminate_starting().await;
+                self.remember_terminated_starting(capture_diagnostics).await;
                 return Err(error);
             }
         };
         if !is_legacy_initialize(&reply) {
-            self.terminate_starting().await;
+            self.remember_terminated_starting(capture_diagnostics).await;
             return Err(McpCallError::Protocol);
         }
         let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
@@ -495,7 +541,7 @@ impl McpSession {
             send_message(&mut process.stdin, &initialized).await
         };
         if let Err(error) = send_result {
-            self.terminate_starting().await;
+            self.remember_terminated_starting(capture_diagnostics).await;
             return Err(error.into());
         }
         Ok(ReadyProcess {
@@ -505,10 +551,31 @@ impl McpSession {
         })
     }
 
-    async fn terminate_starting(&mut self) {
+    async fn remember_terminated_starting(&mut self, capture_diagnostics: bool) {
         if let Some(process) = self.starting.take() {
-            terminate_process(process).await;
+            self.pending_observation =
+                terminate_process_with_observation(process, capture_diagnostics).await;
         }
+    }
+
+    async fn terminate_with_observation(
+        &mut self,
+        capture_diagnostics: bool,
+    ) -> Option<TargetObservation> {
+        self.active_request = None;
+        let mut observation = None;
+        if let Some(ready) = self.ready.take() {
+            observation =
+                terminate_process_with_observation(ready.process, capture_diagnostics).await;
+        }
+        if let Some(process) = self.starting.take() {
+            let starting_observation =
+                terminate_process_with_observation(process, capture_diagnostics).await;
+            if observation.is_none() {
+                observation = starting_observation;
+            }
+        }
+        observation
     }
 
     async fn cancel_and_terminate(&mut self) {
@@ -699,15 +766,27 @@ impl McpProcess {
 }
 
 async fn terminate_process(process: McpProcess) {
+    let _ = terminate_process_with_observation(process, false).await;
+}
+
+async fn terminate_process_with_observation(
+    process: McpProcess,
+    capture_diagnostics: bool,
+) -> Option<TargetObservation> {
     let McpProcess {
         child,
         #[cfg(unix)]
         process_group,
+        stderr_capture,
         stderr_task,
         ..
     } = process;
     let mut child = child;
+    let mut status = child.try_wait().ok().flatten();
     terminate_cli_process(&mut child, process_group).await;
+    if status.is_none() {
+        status = child.try_wait().ok().flatten();
+    }
     let mut stderr_task = stderr_task;
     if timeout(Duration::from_millis(500), &mut stderr_task)
         .await
@@ -716,6 +795,12 @@ async fn terminate_process(process: McpProcess) {
         stderr_task.abort();
         let _ = stderr_task.await;
     }
+    capture_diagnostics.then(|| TargetObservation {
+        stderr: stderr_capture
+            .and_then(|capture| capture.lock().ok().map(|value| value.clone()))
+            .unwrap_or_default(),
+        exit: status.as_ref().map(target_exit),
+    })
 }
 
 impl McpProcess {
