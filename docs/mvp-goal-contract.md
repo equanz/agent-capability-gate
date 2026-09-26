@@ -11,7 +11,7 @@
 goalは次が実測済みの場合だけ開始する。
 
 - Rust 1.98.1、Cargo workspace、`Cargo.lock`、vendored dependency、および`verify`が準備されている。
-- `cargo`のbuildとtestが`--locked --offline`で起動できる。
+- `verify`のCargo呼び出しが準備済みvendorを使い、`--locked --offline`で起動できる。
 - fake CLIとfake MCPのskeletonが実credential、live service、およびnetworkを必要としない。
 - remote repositoryを作成済みで、準備済みbaselineをpushし、remoteから読み返したcommit SHAをloop外で固定している。
 - baselineから既存checkoutとGit directoryを共有しない独立cloneを作り、remoteとcredential helperを持たせていない。

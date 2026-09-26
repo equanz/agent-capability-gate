@@ -18,11 +18,13 @@ flowchart LR
 
 ## Install
 
-Rust 1.98.1 is pinned for this repository. From a source checkout:
+Rust 1.98.1 is pinned for this repository. From the repository root:
 
 ```sh
-cargo install --locked --offline --path crates/boundary --bin mcp-boundary
+cargo install --locked --path crates/boundary --bin mcp-boundary
 ```
+
+Cargo downloads missing dependencies from the configured registry.
 
 This installs `mcp-boundary` to `~/.cargo/bin` by default (or `$CARGO_HOME/bin` when `CARGO_HOME` is set). Remove it with:
 

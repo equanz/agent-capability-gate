@@ -18,7 +18,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/.work/target}"
 export CARGO_INCREMENTAL=0
 
 cargo_locked() {
-    cargo --locked --offline "$@"
+    cargo --config "$repo_root/.cargo/offline.toml" --locked --offline "$@"
 }
 
 case "$command" in

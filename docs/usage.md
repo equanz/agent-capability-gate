@@ -44,13 +44,15 @@ This boundary is only meaningful when the agent cannot modify the broker, config
 
 ## Install from source
 
-The repository pins Rust 1.98.1. Install the public binary from a checkout:
+The repository pins Rust 1.98.1. From the repository root, install the public binary:
 
 ```sh
-cargo install --locked --offline --path crates/boundary --bin mcp-boundary
+cargo install --locked --path crates/boundary --bin mcp-boundary
 ```
 
-For development, `cargo build --locked --offline -p mcp-boundary --bin mcp-boundary` builds the binary using the vendored dependency set. The stable project verification entry point is `./verify all`.
+Cargo downloads missing dependencies from the configured registry.
+
+For development, `cargo build --locked -p mcp-boundary --bin mcp-boundary` uses the same registry. The offline verification entry point is `./verify all`, which requires a prepared `vendor/` directory.
 
 ## Define a CLI capability
 

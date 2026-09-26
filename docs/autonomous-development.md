@@ -172,7 +172,7 @@ enabled = false
 
 profileが`:workspace`を継承するか、上記のように明示的な最小profileとするかは、実toolchainのpreflightで決める。`:workspace`の既定では`.git`がread-onlyなので、継承を採る場合も独立cloneの`.git`への明示的なwrite overrideと実commit試験が必要である。どちらの場合もsecret、設定path、clone外write、およびnetworkのdenyを維持する。[Codex権限プロファイル](https://learn.chatgpt.com/ja-JP/docs/permissions)の構成仕様に従い、実効profileをpreflightで確認する。
 
-`Cargo.toml`、`Cargo.lock`、`.cargo/config.toml`、`verify`、および規範文書は試行錯誤のため編集できる。終了判定は、それらの差分をbaselineから検出し、vendorにない依存やtoolchain変更を要する差分を未完成として扱う。規範文書または`verify`の変更が受入条件を緩める場合も未完成とし、ループ外の再承認へ戻す。vendor、toolchain、実効permission、およびループ外の終了判定は自律ループから変更できない。
+`Cargo.toml`、`Cargo.lock`、`.cargo/offline.toml`、`verify`、および規範文書は試行錯誤のため編集できる。終了判定は、それらの差分をbaselineから検出し、vendorにない依存やtoolchain変更を要する差分を未完成として扱う。規範文書または`verify`の変更が受入条件を緩める場合も未完成とし、ループ外の再承認へ戻す。vendor、toolchain、実効permission、およびループ外の終了判定は自律ループから変更できない。
 
 旧 `sandbox_mode` 設定と permission profile を同じ実行に混在させない。選択した permission system が実際に有効であることを起動後に確認する。
 
@@ -183,7 +183,7 @@ profileが`:workspace`を継承するか、上記のように明示的な最小p
 1. remote repositoryを作り、repository、規範設計、既存差分、およびRust 1.98.1 toolchainを確認する。準備未完了の内容をbaselineとしてpushしない。
 2. 実装アーキテクチャに定めたCargo workspaceと最小のcompile可能なcrate境界を作る。
 3. 直接依存を選定して`Cargo.lock`へ固定し、`cargo vendor`で`vendor/`へ配置する。
-4. Cargoがnetworkと利用者のCargo homeなしに、repository-localな`.cargo/config.toml`と`.work/`だけを使って`--locked --offline`でbuildできる設定を作る。
+4. `verify`がnetworkと利用者のCargo homeなしに、repository-localな`.cargo/offline.toml`と`.work/`だけを使って`--locked --offline`でbuildできる設定を作る。
 5. fake CLI、fake MCP、およびtest fixtureの最小skeletonがlive resourceを参照しないことを確認する。
 6. `verify`と、規範IDを検査する`tests/requirements.toml`の初期形を作る。
 7. filesystem、network、process、およびcommandの必要権限を列挙し、独立clone専用のpermission profileとpreflightを作る。
