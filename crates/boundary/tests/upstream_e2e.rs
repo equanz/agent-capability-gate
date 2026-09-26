@@ -1,5 +1,7 @@
-use mcp_boundary_core::{EnvironmentSpec, Limits, OutputKind, ResolvedMcpInvocation};
-use mcp_boundary_runtime::McpExecutor;
+use mcp_boundary_core::{
+    EnvironmentSpec, Limits, OutputKind, ResolvedMcpInvocation, UpstreamMcpTarget,
+};
+use mcp_boundary_runtime::{Cancellation, McpExecutor};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,6 +27,60 @@ fn invocation(mode: &str, output_kind: OutputKind) -> ResolvedMcpInvocation {
         },
         output_kind,
     }
+}
+
+#[tokio::test]
+async fn catalog_discovery_uses_the_owned_upstream_session() {
+    let invocation = invocation("catalog-noise", OutputKind::Text);
+    let target = UpstreamMcpTarget {
+        id: invocation.target_id.clone(),
+        command: invocation.command.clone(),
+        args: invocation.args.clone(),
+        cwd: invocation.cwd.clone(),
+        environment: invocation.environment.clone(),
+        limits: invocation.limits.clone(),
+    };
+    let executor = McpExecutor::new();
+    let tools = executor
+        .list_tools(&target, &Cancellation::new())
+        .await
+        .expect("discover tools");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[1]["name"], "echo_arguments");
+    let result = executor
+        .execute(invocation)
+        .await
+        .expect("call after discovery");
+    assert!(!result.is_error);
+}
+
+#[tokio::test]
+async fn catalog_change_notification_is_observed_after_a_call() {
+    let invocation = invocation("v2-changing", OutputKind::Structured);
+    let target = UpstreamMcpTarget {
+        id: invocation.target_id.clone(),
+        command: invocation.command.clone(),
+        args: invocation.args.clone(),
+        cwd: invocation.cwd.clone(),
+        environment: invocation.environment.clone(),
+        limits: invocation.limits.clone(),
+    };
+    let executor = McpExecutor::new();
+    let before = executor
+        .list_tools(&target, &Cancellation::new())
+        .await
+        .expect("initial catalog");
+    assert!(before[0]["inputSchema"]["properties"].get("tag").is_none());
+    executor
+        .execute(invocation)
+        .await
+        .expect("call with change notification");
+    assert!(executor.take_list_changed(&target.id).await);
+    let after = executor
+        .list_tools(&target, &Cancellation::new())
+        .await
+        .expect("updated catalog");
+    assert!(after[0]["inputSchema"]["properties"].get("tag").is_some());
 }
 
 #[tokio::test]

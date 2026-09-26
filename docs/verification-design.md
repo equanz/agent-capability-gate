@@ -4,6 +4,8 @@
 
 本書は、[MCP Capability Boundary 設計](design.md)のE2E受入シナリオとプロパティ要件を、外部から観測可能な検証へ翻訳する。[実装アーキテクチャ](implementation-design.md)のcomponent名は検証対象の位置を示すために使うが、内部関数の直接呼び出しだけでE2E成功を代用しない。
 
+本書の既存 MCP fixture は設定 version 1 を対象とする。version 2 の proxy・restriction・catalog 変更の受入条件は [MCP ツール公開 I/F](mcp-exposure-design.md) に定め、version 1 の「公開 catalog 不変」を version 2 の oracle に使わない。
+
 test codeとfixtureは実装とともに変更できる。本書は「何を、どの境界から、何を観測して判定するか」を規定する。個別test名との対応は変更可能なmachine-readable manifestに置き、goal終端で本書とtest実体のdriftを再検査する。
 
 ## 検証層

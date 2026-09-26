@@ -2,7 +2,7 @@
 
 use mcp_boundary_core::{
     BrokerErrorCode, MAX_ARRAY_ITEMS, MAX_JSON_DEPTH, MAX_STRING_BYTES, OutputKind,
-    ResolvedCliInvocation, ResolvedMcpInvocation, canonicalize,
+    ResolvedCliInvocation, ResolvedMcpInvocation, UpstreamMcpTarget, canonicalize,
 };
 #[cfg(unix)]
 use nix::sys::signal::{Signal, killpg};
@@ -10,7 +10,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, setpgid};
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(unix)]
@@ -25,6 +25,8 @@ use tokio::time::{Duration, timeout};
 /// This is a transport bound, independent of the configured public result
 /// limit.  The latter applies to the adapted target result only.
 const UPSTREAM_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_UPSTREAM_DISCOVERY_TOOLS: usize = 4096;
+const MAX_UPSTREAM_DISCOVERY_PAGES: usize = 16;
 
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -193,6 +195,7 @@ struct McpProcess {
     stderr_capture: Option<Arc<StdMutex<Vec<u8>>>>,
     stderr_status: watch::Receiver<StderrStatus>,
     stderr_task: JoinHandle<()>,
+    list_changed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,9 +230,126 @@ impl From<RuntimeError> for McpCallError {
     }
 }
 
+fn map_mcp_call_error(error: McpCallError) -> RuntimeError {
+    match error {
+        McpCallError::Runtime(value) => value,
+        McpCallError::StderrOverflow => RuntimeError::new(
+            BrokerErrorCode::OutputLimitExceeded,
+            "upstream stderr exceeded configured limit",
+        ),
+        McpCallError::StderrFailed => RuntimeError::new(
+            BrokerErrorCode::TargetFailed,
+            "upstream stderr could not be read",
+        ),
+        McpCallError::ConnectionClosed => {
+            RuntimeError::new(BrokerErrorCode::TargetFailed, "upstream connection failed")
+        }
+        McpCallError::Protocol => RuntimeError::new(
+            BrokerErrorCode::TargetFailed,
+            "upstream protocol response was invalid",
+        ),
+        McpCallError::RemoteError => {
+            RuntimeError::new(BrokerErrorCode::TargetFailed, "upstream returned an error")
+        }
+        McpCallError::Output => RuntimeError::new(
+            BrokerErrorCode::InvalidTargetOutput,
+            "upstream output was invalid",
+        ),
+        McpCallError::MessageLimit => RuntimeError::new(
+            BrokerErrorCode::OutputLimitExceeded,
+            "upstream message exceeded configured limit",
+        ),
+    }
+}
+
 impl McpExecutor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Discover one target's bounded tool definitions through the same owned
+    /// process and negotiated connection used for calls. A failed discovery
+    /// never changes another target's state.
+    pub async fn list_tools(
+        &self,
+        target_config: &UpstreamMcpTarget,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<Value>, RuntimeError> {
+        if cancellation.is_cancelled() {
+            return Err(RuntimeError::new(
+                BrokerErrorCode::Cancelled,
+                "broker is shutting down",
+            ));
+        }
+        let _global_slot = self.admission.try_acquire()?;
+        let target = {
+            let mut targets = self.targets.lock().await;
+            targets
+                .entry(target_config.id.clone())
+                .or_insert_with(|| {
+                    Arc::new(McpTarget {
+                        actor: Mutex::new(McpSession {
+                            ready: None,
+                            starting: None,
+                            active_request: None,
+                            pending_observation: None,
+                        }),
+                    })
+                })
+                .clone()
+        };
+        let mut actor = target.actor.try_lock().map_err(|_| {
+            RuntimeError::new(BrokerErrorCode::ServerBusy, "upstream target is busy")
+        })?;
+        let invocation = ResolvedMcpInvocation {
+            target_id: target_config.id.clone(),
+            command: target_config.command.clone(),
+            args: target_config.args.clone(),
+            cwd: target_config.cwd.clone(),
+            environment: target_config.environment.clone(),
+            upstream_tool: String::new(),
+            arguments: json!({}),
+            limits: target_config.limits.clone(),
+            output_kind: OutputKind::Text,
+        };
+        let deadline = Duration::from_millis(target_config.limits.timeout_ms);
+        let mut shutdown = cancellation.receiver();
+        let result = tokio::select! {
+            result = timeout(deadline, actor.list_tools(&invocation, self.capture_diagnostics)) => result,
+            _ = wait_for_cancellation(&mut shutdown) => {
+                actor.cancel_and_terminate().await;
+                return Err(RuntimeError::new(BrokerErrorCode::Cancelled, "broker is shutting down"));
+            }
+        };
+        match result {
+            Ok(Ok(tools)) => Ok(tools),
+            Ok(Err(error)) => {
+                actor.terminate().await;
+                Err(map_mcp_call_error(error))
+            }
+            Err(_) => {
+                actor.cancel_and_terminate().await;
+                Err(RuntimeError::new(
+                    BrokerErrorCode::TargetTimeout,
+                    "upstream target timed out",
+                ))
+            }
+        }
+    }
+
+    /// Consume a list-change notification observed while an upstream request
+    /// was active. Notifications that arrive while idle are consumed by the
+    /// next request on that session.
+    pub async fn take_list_changed(&self, target_id: &str) -> bool {
+        let target = self.targets.lock().await.get(target_id).cloned();
+        let Some(target) = target else { return false };
+        let mut actor = target.actor.lock().await;
+        let Some(ready) = actor.ready.as_mut() else {
+            return false;
+        };
+        let changed = ready.process.list_changed;
+        ready.process.list_changed = false;
+        changed
     }
 
     /// Execute one resolved upstream invocation.  A target has no waiting
@@ -300,37 +420,7 @@ impl McpExecutor {
                         observation = terminated_observation;
                     }
                 }
-                let mut runtime_error = match error {
-                    McpCallError::Runtime(value) => value,
-                    McpCallError::StderrOverflow => RuntimeError::new(
-                        BrokerErrorCode::OutputLimitExceeded,
-                        "upstream stderr exceeded configured limit",
-                    ),
-                    McpCallError::StderrFailed => RuntimeError::new(
-                        BrokerErrorCode::TargetFailed,
-                        "upstream stderr could not be read",
-                    ),
-                    McpCallError::ConnectionClosed => RuntimeError::new(
-                        BrokerErrorCode::TargetFailed,
-                        "upstream connection failed",
-                    ),
-                    McpCallError::Protocol => RuntimeError::new(
-                        BrokerErrorCode::TargetFailed,
-                        "upstream protocol response was invalid",
-                    ),
-                    McpCallError::RemoteError => RuntimeError::new(
-                        BrokerErrorCode::TargetFailed,
-                        "upstream returned an error",
-                    ),
-                    McpCallError::Output => RuntimeError::new(
-                        BrokerErrorCode::InvalidTargetOutput,
-                        "upstream output was invalid",
-                    ),
-                    McpCallError::MessageLimit => RuntimeError::new(
-                        BrokerErrorCode::OutputLimitExceeded,
-                        "upstream message exceeded configured limit",
-                    ),
-                };
+                let mut runtime_error = map_mcp_call_error(error);
                 if runtime_error.observation.is_none() {
                     runtime_error.observation = observation;
                 }
@@ -369,6 +459,86 @@ async fn wait_for_cancellation(signal: &mut watch::Receiver<bool>) {
 }
 
 impl McpSession {
+    async fn list_tools(
+        &mut self,
+        invocation: &ResolvedMcpInvocation,
+        capture_diagnostics: bool,
+    ) -> Result<Vec<Value>, McpCallError> {
+        if let Some(ready) = self.ready.as_mut()
+            && ready
+                .process
+                .child
+                .try_wait()
+                .map_err(|_| McpCallError::ConnectionClosed)?
+                .is_some()
+        {
+            self.terminate().await;
+        }
+        if self.ready.is_none() {
+            self.ready = Some(self.negotiate(invocation, capture_diagnostics).await?);
+        }
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            if pages > MAX_UPSTREAM_DISCOVERY_PAGES {
+                return Err(McpCallError::MessageLimit);
+            }
+            let ready = self.ready.as_mut().expect("negotiation installed process");
+            let id = ready.next_id;
+            ready.next_id = ready.next_id.saturating_add(1);
+            let params = cursor
+                .as_ref()
+                .map_or_else(|| json!({}), |cursor| json!({"cursor": cursor}));
+            let request = json!({"jsonrpc":"2.0", "id":id, "method":"tools/list", "params":params});
+            send_message(&mut ready.process.stdin, &request)
+                .await
+                .map_err(McpCallError::from)?;
+            self.active_request = Some(ActiveRequest {
+                revision: ready.revision,
+                id,
+            });
+            let reply = ready.process.read_reply(id).await;
+            self.active_request = None;
+            let reply = bounded_json(reply?, 1)?;
+            let object = reply.as_object().ok_or(McpCallError::Protocol)?;
+            let page = object
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or(McpCallError::Protocol)?;
+            for tool in page {
+                let object = tool.as_object().ok_or(McpCallError::Protocol)?;
+                if object.get("name").and_then(Value::as_str).is_none()
+                    || object
+                        .get("inputSchema")
+                        .and_then(Value::as_object)
+                        .is_none()
+                {
+                    return Err(McpCallError::Protocol);
+                }
+                tools.push(tool.clone());
+                if tools.len() > MAX_UPSTREAM_DISCOVERY_TOOLS {
+                    return Err(McpCallError::MessageLimit);
+                }
+            }
+            let next = object.get("nextCursor").and_then(Value::as_str);
+            if object.contains_key("nextCursor") && next.is_none() {
+                return Err(McpCallError::Protocol);
+            }
+            match next {
+                Some(next) if !next.is_empty() && seen_cursors.insert(next.to_owned()) => {
+                    cursor = Some(next.to_owned())
+                }
+                Some(_) => return Err(McpCallError::Protocol),
+                None => {
+                    return Ok(tools);
+                }
+            }
+        }
+    }
+
     fn diagnostic_observation(&mut self, capture_diagnostics: bool) -> Option<TargetObservation> {
         if !capture_diagnostics {
             return None;
@@ -741,6 +911,7 @@ async fn spawn_process(
         stderr_capture,
         stderr_status: status_rx,
         stderr_task,
+        list_changed: false,
     })
 }
 
@@ -843,6 +1014,11 @@ impl McpProcess {
                 // Notifications do not complete a request. Server requests
                 // (method plus id) are deliberately not answered in MVP.
                 if value.get("id").is_none() {
+                    if value.get("method").and_then(Value::as_str)
+                        == Some("notifications/tools/list_changed")
+                    {
+                        self.list_changed = true;
+                    }
                     continue;
                 }
                 return Err(McpCallError::Protocol);
@@ -987,6 +1163,9 @@ fn adapt_result(
         return Err(McpCallError::Output);
     }
     if kind == OutputKind::Structured && structured.is_none() {
+        return Err(McpCallError::Output);
+    }
+    if kind == OutputKind::McpAuto && text_blocks.is_empty() && structured.is_none() {
         return Err(McpCallError::Output);
     }
     let structured_bytes = structured
@@ -1333,7 +1512,7 @@ async fn execute_cli_inner(
                 }),
             })
         }
-        OutputKind::Structured => Err(RuntimeError::new(
+        OutputKind::Structured | OutputKind::McpAuto => Err(RuntimeError::new(
             BrokerErrorCode::InvalidTargetOutput,
             "CLI targets do not support structured upstream output",
         )),

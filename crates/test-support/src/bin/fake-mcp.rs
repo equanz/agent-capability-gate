@@ -31,11 +31,35 @@ fn main() {
             eprint!("{stderr_marker}");
             let _ = io::stderr().flush();
         }
+        if matches!(mode.as_str(), "v2-catalog" | "v2-switchable")
+            && method == "tools/call"
+            && let Some(marker) = marker.as_deref()
+        {
+            let tool = request
+                .get("params")
+                .and_then(|params| params.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(marker)
+                .expect("open v2 call marker");
+            writeln!(file, "{tool}").expect("record v2 call");
+        }
         if mode == "protocol-error" {
             // Deliberately violate JSON-lines framing. The broker must map
             // this to a stable protocol failure and never expose the bytes.
             let _ = stdout.write_all(b"not-json\n");
             let _ = stdout.flush();
+            break;
+        }
+        if mode == "v2-switchable"
+            && matches!(method, "server/discover" | "initialize")
+            && marker.as_deref().is_some_and(|path| {
+                std::fs::read_to_string(path).is_ok_and(|state| state == "offline")
+            })
+        {
             break;
         }
         if mode == "legacy-restart"
@@ -71,6 +95,120 @@ fn main() {
             let _ = io::stderr().flush();
         }
         let response = match (mode.as_str(), method) {
+            (
+                "v2-catalog"
+                | "v2-changing"
+                | "v2-breaking"
+                | "v2-reject"
+                | "v2-switchable"
+                | "v2-unsupported"
+                | "v2-missing-required",
+                "server/discover",
+            ) => json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{"listChanged":true}}}
+            }),
+            ("v2-catalog" | "v2-switchable", "tools/list") => json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"tools":[
+                    {"name":"echo_arguments","description":"Echo supplied arguments",
+                     "inputSchema":{"type":"object","properties":{"value":{"type":"string"}},
+                                    "required":["value"],"additionalProperties":false}},
+                    {"name":"convert","description":"Convert a fixed source",
+                     "inputSchema":{"type":"object","properties":{
+                         "source":{"type":"string"},"format":{"type":"string"},
+                         "offset":{"type":"integer"},"value":{"type":"string"},
+                         "optional_note":{"type":"string"}},
+                         "required":["source","format","offset","value"],"additionalProperties":false}},
+                    {"name":"hidden","inputSchema":{"type":"object","properties":{},
+                         "required":[],"additionalProperties":false}}
+                ]}
+            }),
+            ("v2-unsupported" | "v2-missing-required", "tools/list") => {
+                let schema = if mode == "v2-unsupported" {
+                    json!({"type":"object","$ref":"#/$defs/convert","$defs":{"convert":{"type":"object"}}})
+                } else {
+                    json!({"type":"object","properties":{
+                        "source":{"type":"string"},"format":{"type":"string"},
+                        "offset":{"type":"integer"},"value":{"type":"string"},
+                        "admin":{"type":"string"}},
+                        "required":["source","format","offset","value","admin"],"additionalProperties":false})
+                };
+                json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
+                    {"name":"echo_arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}},
+                    {"name":"convert","inputSchema":schema}
+                ]}})
+            }
+            ("v2-catalog" | "v2-switchable", "tools/call") => call_result(&request, true),
+            ("v2-changing", "tools/list") => {
+                let (properties, required) = match call_number {
+                    0 => (
+                        json!({"value":{"type":"string"},"note":{"type":"string"}}),
+                        json!(["value"]),
+                    ),
+                    1 => (
+                        json!({"value":{"type":"string"},"note":{"type":"string"},"tag":{"type":"string"}}),
+                        json!(["value"]),
+                    ),
+                    2 => (
+                        json!({"tag":{"type":"string"},"token":{"type":"string"}}),
+                        json!(["tag", "token"]),
+                    ),
+                    _ => (json!({"token":{"type":"string"}}), json!([])),
+                };
+                json!({
+                    "jsonrpc":"2.0", "id":id,
+                    "result":{"tools":[
+                        {"name":"echo_arguments","description":"Echo supplied arguments",
+                         "inputSchema":{"type":"object","properties":properties,
+                                        "required":required,"additionalProperties":false}},
+                        {"name":"new_unselected","inputSchema":{"type":"object","properties":{},
+                             "required":[],"additionalProperties":false}}
+                    ]}
+                })
+            }
+            ("v2-breaking", "tools/list") => {
+                let convert = if call_number == 0 {
+                    json!({"name":"convert","description":"Convert a fixed source",
+                        "inputSchema":{"type":"object","properties":{
+                            "source":{"type":"string"},"format":{"type":"string"},
+                            "offset":{"type":"integer"},"value":{"type":"string"}},
+                            "required":["source","format","offset","value"],"additionalProperties":false}})
+                } else {
+                    json!({"name":"convert","description":"Convert a fixed source",
+                        "inputSchema":{"type":"object","properties":{"must":{"type":"string"}},
+                            "required":["must"],"additionalProperties":false}})
+                };
+                json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
+                    {"name":"echo_arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}},
+                    convert
+                ]}})
+            }
+            ("v2-reject", "tools/list") => json!({"jsonrpc":"2.0","id":id,"result":{"tools":[
+                {"name":"echo_arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}}
+            ]}}),
+            ("v2-changing", "tools/call") => {
+                call_number += 1;
+                let notification =
+                    json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+                let _ = serde_json::to_writer(&mut stdout, &notification);
+                let _ = stdout.write_all(b"\n");
+                let _ = stdout.flush();
+                call_result(&request, true)
+            }
+            ("v2-breaking", "tools/call") => {
+                call_number += 1;
+                let notification =
+                    json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+                let _ = serde_json::to_writer(&mut stdout, &notification);
+                let _ = stdout.write_all(b"\n");
+                let _ = stdout.flush();
+                call_result(&request, true)
+            }
+            ("v2-reject", "tools/call") => json!({
+                "jsonrpc":"2.0","id":id,
+                "error":{"code":-32602,"message":"arguments rejected"}
+            }),
             (mode, "server/discover") if mode.starts_with("wire-padding-") => json!({
                 "jsonrpc":"2.0", "id":id,
                 "result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{}}}

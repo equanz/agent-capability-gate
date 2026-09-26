@@ -37,6 +37,7 @@ pub enum BrokerErrorCode {
     InvalidTargetOutput,
     Cancelled,
     ServerBusy,
+    ToolDefinitionChanged,
 }
 impl BrokerErrorCode {
     pub const fn as_str(self) -> &'static str {
@@ -50,6 +51,7 @@ impl BrokerErrorCode {
             Self::InvalidTargetOutput => "INVALID_TARGET_OUTPUT",
             Self::Cancelled => "CANCELLED",
             Self::ServerBusy => "SERVER_BUSY",
+            Self::ToolDefinitionChanged => "TOOL_DEFINITION_CHANGED",
         }
     }
 }
@@ -113,7 +115,8 @@ struct RawConfig {
     version: u64,
     server: RawServer,
     targets: BTreeMap<String, RawTarget>,
-    tools: BTreeMap<String, RawTool>,
+    #[serde(default)]
+    tools: Option<BTreeMap<String, RawTool>>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,7 +164,25 @@ struct RawTarget {
     cwd: Option<String>,
     #[serde(default)]
     environment: RawEnvironment,
+    #[serde(default)]
+    expose: Option<BTreeMap<String, RawExposure>>,
     limits: RawTargetLimits,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExposure {
+    #[serde(rename = "as", default)]
+    public_name: Option<String>,
+    #[serde(default)]
+    restrict: Option<RawRestriction>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRestriction {
+    #[serde(default)]
+    inputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    fixed: BTreeMap<String, Value>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -381,6 +402,8 @@ pub enum OutputKind {
     Text,
     Json,
     Structured,
+    /// MCP v2 proxy/restriction calls accept either text or structured content.
+    McpAuto,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum McpBinding {
@@ -395,14 +418,35 @@ pub struct McpInvoke {
     pub tool: String,
     pub arguments: BTreeMap<String, McpBinding>,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum McpExposureMode {
+    Proxy,
+    Restriction(McpRestriction),
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpRestriction {
+    /// Additional top-level constraints, keyed by public input name.
+    pub inputs: BTreeMap<String, Value>,
+    /// Server-owned values inserted into the upstream arguments.
+    pub fixed: BTreeMap<String, Value>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpExposure {
+    pub public_name: String,
+    pub target_id: String,
+    pub upstream_tool: String,
+    pub mode: McpExposureMode,
+}
 #[derive(Clone)]
 pub struct ValidatedConfig {
+    pub version: u64,
     pub server_name: String,
     pub request_bytes: usize,
     pub json_depth: usize,
     pub targets: BTreeMap<String, CliTarget>,
     pub upstream_targets: BTreeMap<String, UpstreamMcpTarget>,
     pub tools: BTreeMap<String, CompiledTool>,
+    pub v2_exposures: BTreeMap<String, McpExposure>,
     server_environment: BTreeMap<String, String>,
 }
 impl fmt::Debug for ValidatedConfig {
@@ -417,6 +461,10 @@ impl fmt::Debug for ValidatedConfig {
                 &self.upstream_targets.keys().collect::<Vec<_>>(),
             )
             .field("tool_names", &self.tools.keys().collect::<Vec<_>>())
+            .field(
+                "v2_exposure_names",
+                &self.v2_exposures.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -480,9 +528,15 @@ fn validate_raw(
     _source: String,
     environment: &BTreeMap<String, String>,
 ) -> Result<ValidatedConfig, Diagnostic> {
-    if raw.version != 1 {
+    if raw.version != 1 && raw.version != 2 {
         return Err(Diagnostic::invalid("/version", "unsupported version"));
     }
+    let version = raw.version;
+    let raw_tools = match (version, raw.tools) {
+        (1, None) => return Err(Diagnostic::invalid("/tools", "required for version 1")),
+        (_, Some(tools)) => tools,
+        (_, None) => BTreeMap::new(),
+    };
     if raw.server.transport.kind != "stdio" {
         return Err(Diagnostic::invalid(
             "/server/transport/kind",
@@ -501,7 +555,7 @@ fn validate_raw(
             "must be 1..32",
         ));
     }
-    if raw.tools.len() > MAX_TOOLS {
+    if raw_tools.len() > MAX_TOOLS {
         return Err(Diagnostic::invalid("/tools", "too many tools"));
     }
     if raw.server.name.is_empty() {
@@ -509,10 +563,17 @@ fn validate_raw(
     }
     let mut targets = BTreeMap::new();
     let mut upstream_targets = BTreeMap::new();
+    let mut raw_exposures = Vec::new();
     for (id, target) in raw.targets {
         validate_id(&id, "/targets")?;
         match target.kind.as_str() {
             "cli" => {
+                if target.expose.is_some() {
+                    return Err(Diagnostic::invalid(
+                        format!("/targets/{id}/expose"),
+                        "expose is only allowed on mcp targets",
+                    ));
+                }
                 let executable = absolute_path(
                     target.executable.as_deref().ok_or_else(|| {
                         Diagnostic::invalid(format!("/targets/{id}/executable"), "required for cli")
@@ -534,7 +595,7 @@ fn validate_raw(
                 targets.insert(
                     id.clone(),
                     CliTarget {
-                        id,
+                        id: id.clone(),
                         executable,
                         cwd,
                         environment: env,
@@ -556,6 +617,12 @@ fn validate_raw(
                 );
             }
             "mcp" => {
+                if version == 1 && target.expose.is_some() {
+                    return Err(Diagnostic::invalid(
+                        format!("/targets/{id}/expose"),
+                        "expose requires version 2",
+                    ));
+                }
                 let transport = target.transport.ok_or_else(|| {
                     Diagnostic::invalid(format!("/targets/{id}/transport"), "required for mcp")
                 })?;
@@ -585,7 +652,7 @@ fn validate_raw(
                 upstream_targets.insert(
                     id.clone(),
                     UpstreamMcpTarget {
-                        id,
+                        id: id.clone(),
                         command,
                         args: transport.args,
                         cwd,
@@ -598,6 +665,9 @@ fn validate_raw(
                         },
                     },
                 );
+                if let Some(expose) = target.expose {
+                    raw_exposures.push((id.clone(), expose));
+                }
             }
             _ => {
                 return Err(Diagnostic::invalid(
@@ -607,9 +677,15 @@ fn validate_raw(
             }
         }
     }
-    let mut tools = BTreeMap::new();
-    for (name, tool) in raw.tools {
+    let mut tools: BTreeMap<String, CompiledTool> = BTreeMap::new();
+    for (name, tool) in raw_tools {
         validate_id(&name, "/tools")?;
+        if version == 2 && tool.invoke.mcp.is_some() {
+            return Err(Diagnostic::invalid(
+                format!("/tools/{name}/invoke/mcp"),
+                "root version 2 tools are CLI-only",
+            ));
+        }
         if !targets.contains_key(&tool.invoke.target)
             && !upstream_targets.contains_key(&tool.invoke.target)
         {
@@ -658,6 +734,12 @@ fn validate_raw(
                 "exactly one cli or mcp invocation is required",
             ));
         }
+        if version == 2 && !targets.contains_key(&tool.invoke.target) {
+            return Err(Diagnostic::invalid(
+                format!("/tools/{name}/invoke/target"),
+                "root tools must target cli",
+            ));
+        }
         let output_kind = match (tool.output.kind.as_str(), mcp.is_some()) {
             ("text", _) => OutputKind::Text,
             ("json", false) => OutputKind::Json,
@@ -689,13 +771,103 @@ fn validate_raw(
             },
         );
     }
+    if version == 2 {
+        for tool in tools.values() {
+            if !targets.contains_key(&tool.target) {
+                return Err(Diagnostic::invalid(
+                    "/tools",
+                    "version 2 root tools must target cli",
+                ));
+            }
+        }
+    }
+    let mut v2_exposures = BTreeMap::new();
+    if version == 2 {
+        for (target_id, exposures) in raw_exposures {
+            for (upstream_tool, raw) in exposures {
+                validate_mcp_tool_name(&upstream_tool, &format!("/targets/{target_id}/expose"))?;
+                let public_name = raw.public_name.unwrap_or_else(|| upstream_tool.clone());
+                validate_mcp_tool_name(
+                    &public_name,
+                    &format!("/targets/{target_id}/expose/{upstream_tool}/as"),
+                )?;
+                if tools.contains_key(&public_name) || v2_exposures.contains_key(&public_name) {
+                    return Err(Diagnostic::invalid(
+                        format!("/targets/{target_id}/expose/{upstream_tool}"),
+                        "public tool name collides with another tool",
+                    ));
+                }
+                let mode = if let Some(restrict) = raw.restrict {
+                    for key in restrict.inputs.keys().chain(restrict.fixed.keys()) {
+                        validate_id(
+                            key,
+                            &format!("/targets/{target_id}/expose/{upstream_tool}/restrict"),
+                        )?;
+                    }
+                    if restrict
+                        .inputs
+                        .keys()
+                        .any(|key| restrict.fixed.contains_key(key))
+                    {
+                        return Err(Diagnostic::invalid(
+                            format!("/targets/{target_id}/expose/{upstream_tool}/restrict"),
+                            "a property cannot be both input and fixed",
+                        ));
+                    }
+                    for (key, constraint) in &restrict.inputs {
+                        validate_restriction_constraint(
+                            constraint,
+                            &format!(
+                                "/targets/{target_id}/expose/{upstream_tool}/restrict/inputs/{key}"
+                            ),
+                        )?;
+                        if value_exceeds_depth(constraint, 1) || contains_nul(constraint) {
+                            return Err(Diagnostic::invalid(
+                                format!(
+                                    "/targets/{target_id}/expose/{upstream_tool}/restrict/inputs/{key}"
+                                ),
+                                "constraint exceeds value limits",
+                            ));
+                        }
+                    }
+                    for (key, value) in &restrict.fixed {
+                        if value_exceeds_depth(value, 1) || contains_nul(value) {
+                            return Err(Diagnostic::invalid(
+                                format!(
+                                    "/targets/{target_id}/expose/{upstream_tool}/restrict/fixed/{key}"
+                                ),
+                                "fixed value exceeds value limits",
+                            ));
+                        }
+                    }
+                    McpExposureMode::Restriction(McpRestriction {
+                        inputs: restrict.inputs,
+                        fixed: restrict.fixed,
+                    })
+                } else {
+                    McpExposureMode::Proxy
+                };
+                v2_exposures.insert(
+                    public_name.clone(),
+                    McpExposure {
+                        public_name,
+                        target_id: target_id.clone(),
+                        upstream_tool,
+                        mode,
+                    },
+                );
+            }
+        }
+    }
     Ok(ValidatedConfig {
+        version,
         server_name: raw.server.name,
         request_bytes: raw.server.limits.request_bytes,
         json_depth: raw.server.limits.json_depth,
         targets,
         upstream_targets,
         tools,
+        v2_exposures,
         server_environment: environment.clone(),
     })
 }
@@ -773,6 +945,51 @@ fn validate_mcp_tool_name(value: &str, path: &str) -> Result<String, Diagnostic>
         ));
     }
     Ok(value.to_owned())
+}
+fn validate_restriction_constraint(value: &Value, path: &str) -> Result<(), Diagnostic> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| Diagnostic::invalid(path, "restriction constraint must be object"))?;
+    for key in obj.keys() {
+        if !matches!(
+            key.as_str(),
+            "enum" | "minimum" | "maximum" | "minLength" | "maxLength" | "pattern"
+        ) {
+            return Err(Diagnostic::invalid(
+                format!("{path}/{key}"),
+                "unsupported restriction constraint",
+            ));
+        }
+    }
+    if obj.get("enum").is_some_and(|v| !v.is_array()) {
+        return Err(Diagnostic::invalid(
+            format!("{path}/enum"),
+            "must be an array",
+        ));
+    }
+    for key in ["minimum", "maximum"] {
+        if obj.get(key).is_some_and(|v| !v.is_number()) {
+            return Err(Diagnostic::invalid(
+                format!("{path}/{key}"),
+                "must be number",
+            ));
+        }
+    }
+    for key in ["minLength", "maxLength"] {
+        if obj.get(key).is_some_and(|v| v.as_u64().is_none()) {
+            return Err(Diagnostic::invalid(
+                format!("{path}/{key}"),
+                "must be a positive integer",
+            ));
+        }
+    }
+    if obj.get("pattern").is_some_and(|v| !v.is_string()) {
+        return Err(Diagnostic::invalid(
+            format!("{path}/pattern"),
+            "must be string",
+        ));
+    }
+    Ok(())
 }
 fn validate_environment(
     raw: RawEnvironment,
@@ -1021,6 +1238,25 @@ fn compile_schema(
     root: bool,
     depth: usize,
 ) -> Result<CompiledSchema, Diagnostic> {
+    compile_schema_impl(value, path, root, depth, true)
+}
+
+fn compile_schema_permissive(
+    value: &Value,
+    path: &str,
+    root: bool,
+    depth: usize,
+) -> Result<CompiledSchema, Diagnostic> {
+    compile_schema_impl(value, path, root, depth, false)
+}
+
+fn compile_schema_impl(
+    value: &Value,
+    path: &str,
+    root: bool,
+    depth: usize,
+    require_all_properties: bool,
+) -> Result<CompiledSchema, Diagnostic> {
     if depth > MAX_SCHEMA_DEPTH {
         return Err(Diagnostic::invalid(
             path,
@@ -1109,8 +1345,9 @@ fn compile_schema(
             .map(|v| Ok(v.clone()))
             .collect::<Result<BTreeSet<_>, _>>()?;
         if required.len() != required_vec.len()
-            || required.len() != props.len()
-            || props.keys().any(|k| !required.contains(k))
+            || (require_all_properties
+                && (required.len() != props.len() || props.keys().any(|k| !required.contains(k))))
+            || required.iter().any(|k| !props.contains_key(k))
         {
             return Err(Diagnostic::invalid(
                 format!("{path}/required"),
@@ -1126,11 +1363,12 @@ fn compile_schema(
         for (k, v) in props {
             properties.insert(
                 k.clone(),
-                compile_schema(
+                compile_schema_impl(
                     v,
                     &format!("{path}/properties/{}", escape_ptr(k)),
                     false,
                     depth + 1,
+                    require_all_properties,
                 )?,
             );
         }
@@ -1148,12 +1386,13 @@ fn compile_schema(
         return Err(Diagnostic::invalid(path, "array limit exceeds 1024"));
     }
     let items = if kind == SchemaKind::Array {
-        Some(Box::new(compile_schema(
+        Some(Box::new(compile_schema_impl(
             obj.get("items")
                 .ok_or_else(|| Diagnostic::invalid(format!("{path}/items"), "items is required"))?,
             &format!("{path}/items"),
             false,
             depth + 1,
+            require_all_properties,
         )?))
     } else {
         None
@@ -1783,6 +2022,397 @@ pub fn resolve_mcp(
     })
 }
 
+/// Derive a frozen public MCP tool definition for a v2 restriction.
+///
+/// The upstream definition is treated as data, never as a source of executable
+/// policy.  Only bounded object schemas with explicit closed properties are
+/// accepted; selected properties are intersected with the administrator's
+/// additional constraints and fixed values are removed from the public input.
+pub fn derive_restricted_public_tool(
+    exposure: &McpExposure,
+    upstream_tool_json: &Value,
+) -> Result<Value, Diagnostic> {
+    let object = upstream_tool_json
+        .as_object()
+        .ok_or_else(|| Diagnostic::invalid("/tool", "upstream tool must be object"))?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Diagnostic::invalid("/tool/name", "upstream tool name is required"))?;
+    if name != exposure.upstream_tool {
+        return Err(Diagnostic::invalid(
+            "/tool/name",
+            "upstream tool name does not match exposure",
+        ));
+    }
+    let input_schema = object.get("inputSchema").ok_or_else(|| {
+        Diagnostic::invalid("/tool/inputSchema", "upstream inputSchema is required")
+    })?;
+    if !input_schema.is_object()
+        || value_exceeds_depth(input_schema, 1)
+        || contains_nul(input_schema)
+    {
+        return Err(Diagnostic::invalid(
+            "/tool/inputSchema",
+            "upstream inputSchema is not bounded JSON object",
+        ));
+    }
+    let mut result = upstream_tool_json.clone();
+    let result_object = result
+        .as_object_mut()
+        .ok_or_else(|| Diagnostic::invalid("/tool", "upstream tool must be object"))?;
+    result_object.insert("name".into(), Value::String(exposure.public_name.clone()));
+
+    match &exposure.mode {
+        McpExposureMode::Proxy => Ok(canonicalize(result)),
+        McpExposureMode::Restriction(restriction) => {
+            let upstream = compile_schema_permissive(input_schema, "/tool/inputSchema", true, 1)?;
+            let upstream_object = input_schema.as_object().ok_or_else(|| {
+                Diagnostic::invalid("/tool/inputSchema", "upstream inputSchema must be object")
+            })?;
+            let properties = upstream_object
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| Diagnostic::invalid("/tool/inputSchema/properties", "required"))?;
+            for key in restriction.inputs.keys().chain(restriction.fixed.keys()) {
+                if !properties.contains_key(key) {
+                    return Err(Diagnostic::invalid(
+                        format!("/restrict/{key}"),
+                        "property is absent from upstream schema",
+                    ));
+                }
+            }
+            for required in &upstream.required {
+                if !restriction.inputs.contains_key(required)
+                    && !restriction.fixed.contains_key(required)
+                {
+                    return Err(Diagnostic::invalid(
+                        format!("/restrict/{required}"),
+                        "upstream required property is neither exposed nor fixed",
+                    ));
+                }
+            }
+            if restriction
+                .inputs
+                .keys()
+                .any(|key| !upstream.required.contains(key))
+            {
+                return Err(Diagnostic::invalid(
+                    "/restrict/inputs",
+                    "optional upstream properties cannot be exposed as inputs",
+                ));
+            }
+            for (key, value) in &restriction.fixed {
+                let property = compile_schema_permissive(
+                    properties.get(key).unwrap(),
+                    &format!("/tool/inputSchema/properties/{}", escape_ptr(key)),
+                    false,
+                    2,
+                )?;
+                let mut issues = Vec::new();
+                validate_value(&property, value, &format!("/fixed/{key}"), &mut issues);
+                if let Some(issue) = issues.first() {
+                    return Err(Diagnostic::invalid(
+                        issue.path.clone(),
+                        issue.constraint.clone(),
+                    ));
+                }
+            }
+            let mut public_properties = Map::new();
+            for (key, constraint) in &restriction.inputs {
+                let property = properties.get(key).unwrap();
+                public_properties.insert(
+                    key.clone(),
+                    intersect_property_schema(
+                        property,
+                        constraint,
+                        &format!("/restrict/inputs/{key}"),
+                    )?,
+                );
+            }
+            let required = upstream
+                .required
+                .iter()
+                .filter(|key| restriction.inputs.contains_key(*key))
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>();
+            let public_schema = serde_json::json!({
+                "type": "object",
+                "properties": Value::Object(public_properties),
+                "required": required,
+                "additionalProperties": false
+            });
+            let public_schema =
+                compile_schema_permissive(&public_schema, "/tool/inputSchema", true, 1)?;
+            result_object.insert("inputSchema".into(), public_schema.public_json);
+            Ok(canonicalize(result))
+        }
+    }
+}
+
+/// Detect only definite incompatibilities with a frozen restriction. A new
+/// schema shape or unknown keyword is not by itself proof that an existing
+/// constrained call stopped working; the upstream may still reject a call.
+pub fn restricted_compatibility(
+    exposure: &McpExposure,
+    _frozen_public: &Value,
+    new_upstream: &Value,
+) -> bool {
+    if new_upstream.get("name").and_then(Value::as_str) != Some(exposure.upstream_tool.as_str()) {
+        return false;
+    }
+    let McpExposureMode::Restriction(restriction) = &exposure.mode else {
+        return true;
+    };
+    let Some(schema) = new_upstream.get("inputSchema").and_then(Value::as_object) else {
+        return true;
+    };
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        if restriction
+            .inputs
+            .keys()
+            .chain(restriction.fixed.keys())
+            .any(|key| !properties.contains_key(key))
+        {
+            return false;
+        }
+        for (key, value) in &restriction.fixed {
+            let Some(property) = properties.get(key) else {
+                continue;
+            };
+            if let Ok(compiled) = compile_schema_permissive(
+                property,
+                &format!("/tool/inputSchema/properties/{}", escape_ptr(key)),
+                false,
+                2,
+            ) {
+                let mut issues = Vec::new();
+                validate_value(&compiled, value, &format!("/fixed/{key}"), &mut issues);
+                if !issues.is_empty() {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(required) = schema.get("required").and_then(Value::as_array)
+        && required.iter().filter_map(Value::as_str).any(|key| {
+            !restriction.inputs.contains_key(key) && !restriction.fixed.contains_key(key)
+        })
+    {
+        return false;
+    }
+    true
+}
+
+/// Resolve a v2 exposure.  Proxy calls intentionally do not validate against
+/// a stale schema; restriction calls validate the supplied frozen public
+/// schema and insert only the configured fixed values.
+pub fn resolve_v2_mcp(
+    config: &ValidatedConfig,
+    public_name: &str,
+    public_tool_json: &Value,
+    arguments: &Value,
+) -> Result<ResolvedMcpInvocation, Diagnostic> {
+    let exposure = config
+        .v2_exposures
+        .get(public_name)
+        .ok_or_else(|| Diagnostic::invalid("/tool", "unknown tool"))?;
+    let target = config
+        .upstream_targets
+        .get(&exposure.target_id)
+        .ok_or_else(|| Diagnostic::invalid("/tool", "unknown MCP target"))?;
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| Diagnostic::invalid("/arguments", "MCP arguments must be object"))?;
+    if public_tool_json.get("name").and_then(Value::as_str) != Some(public_name) {
+        return Err(Diagnostic::invalid(
+            "/tool/name",
+            "public tool name does not match exposure",
+        ));
+    }
+    let mut forwarded = arguments.clone();
+    if let McpExposureMode::Restriction(restriction) = &exposure.mode {
+        let schema = public_tool_json
+            .get("inputSchema")
+            .ok_or_else(|| Diagnostic::invalid("/tool/inputSchema", "required"))?;
+        let compiled = compile_schema_permissive(schema, "/tool/inputSchema", true, 1)?;
+        if let Err(issues) = validate_input(&compiled, &Value::Object(arguments.clone())) {
+            let issue = &issues[0];
+            return Err(Diagnostic::invalid(
+                issue.path.clone(),
+                issue.constraint.clone(),
+            ));
+        }
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Diagnostic::invalid("/tool/inputSchema/properties", "required"))?;
+        if properties
+            .keys()
+            .any(|key| !restriction.inputs.contains_key(key))
+            || restriction
+                .inputs
+                .keys()
+                .any(|key| !properties.contains_key(key))
+            || restriction
+                .fixed
+                .keys()
+                .any(|key| properties.contains_key(key))
+        {
+            return Err(Diagnostic::invalid(
+                "/tool/inputSchema",
+                "schema does not match restriction",
+            ));
+        }
+        for (key, constraint) in &restriction.inputs {
+            if let Some(value) = arguments.get(key) {
+                let property = properties.get(key).ok_or_else(|| {
+                    Diagnostic::invalid(format!("/tool/inputSchema/properties/{key}"), "missing")
+                })?;
+                let constrained = intersect_property_schema(
+                    property,
+                    constraint,
+                    &format!("/restrict/inputs/{key}"),
+                )?;
+                let compiled = compile_schema_permissive(&constrained, "/property", false, 2)?;
+                let mut issues = Vec::new();
+                validate_value(&compiled, value, &format!("/arguments/{key}"), &mut issues);
+                if let Some(issue) = issues.first() {
+                    return Err(Diagnostic::invalid(
+                        issue.path.clone(),
+                        issue.constraint.clone(),
+                    ));
+                }
+            }
+        }
+        for (key, value) in &restriction.fixed {
+            if arguments.contains_key(key) {
+                return Err(Diagnostic::invalid(
+                    format!("/arguments/{key}"),
+                    "fixed property cannot be supplied",
+                ));
+            }
+            forwarded.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(ResolvedMcpInvocation {
+        target_id: target.id.clone(),
+        command: target.command.clone(),
+        args: target.args.clone(),
+        cwd: target.cwd.clone(),
+        environment: target.environment.clone(),
+        upstream_tool: exposure.upstream_tool.clone(),
+        arguments: Value::Object(forwarded),
+        limits: target.limits.clone(),
+        output_kind: OutputKind::McpAuto,
+    })
+}
+
+fn intersect_property_schema(
+    property: &Value,
+    constraint: &Value,
+    path: &str,
+) -> Result<Value, Diagnostic> {
+    let mut result = property
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Diagnostic::invalid(path, "property schema must be object"))?;
+    let property_kind = result
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Diagnostic::invalid(path, "property type is required"))?
+        .to_owned();
+    let constraints = constraint
+        .as_object()
+        .ok_or_else(|| Diagnostic::invalid(path, "constraint must be object"))?;
+    if let (Some(existing), Some(additional)) = (result.get("pattern"), constraints.get("pattern"))
+        && existing != additional
+    {
+        return Err(Diagnostic::invalid(
+            path,
+            "cannot intersect two patterns safely",
+        ));
+    }
+    if let Some(value) = constraints.get("pattern") {
+        if property_kind != "string" {
+            return Err(Diagnostic::invalid(
+                path,
+                "pattern requires string property",
+            ));
+        }
+        result.insert("pattern".into(), value.clone());
+    }
+    for key in ["minLength", "maxLength"] {
+        if let Some(value) = constraints.get(key) {
+            if property_kind != "string" {
+                return Err(Diagnostic::invalid(
+                    path,
+                    format!("{key} requires string property"),
+                ));
+            }
+            let incoming = value
+                .as_u64()
+                .ok_or_else(|| Diagnostic::invalid(path, "length must be integer"))?;
+            let current = result.get(key).and_then(Value::as_u64);
+            let merged = if key == "minLength" {
+                current.unwrap_or(0).max(incoming)
+            } else {
+                current.unwrap_or(u64::MAX).min(incoming)
+            };
+            result.insert(key.into(), Value::from(merged));
+        }
+    }
+    for key in ["minimum", "maximum"] {
+        if let Some(value) = constraints.get(key) {
+            if property_kind != "integer" && property_kind != "number" {
+                return Err(Diagnostic::invalid(
+                    path,
+                    format!("{key} requires numeric property"),
+                ));
+            }
+            let incoming = value
+                .as_number()
+                .ok_or_else(|| Diagnostic::invalid(path, "numeric bound must be number"))?;
+            let current = result.get(key).and_then(Value::as_number);
+            let choose_incoming = match (key, current) {
+                ("minimum", Some(current)) => numeric_compare(incoming, current)
+                    .is_some_and(|order| order == std::cmp::Ordering::Greater),
+                ("maximum", Some(current)) => numeric_compare(incoming, current)
+                    .is_some_and(|order| order == std::cmp::Ordering::Less),
+                _ => true,
+            };
+            if choose_incoming || current.is_none() {
+                result.insert(key.into(), Value::Number(incoming.clone()));
+            }
+        }
+    }
+    if let Some(value) = constraints.get("enum") {
+        let incoming = value
+            .as_array()
+            .ok_or_else(|| Diagnostic::invalid(path, "enum must be array"))?;
+        let values = if let Some(existing) = result.get("enum").and_then(Value::as_array) {
+            existing
+                .iter()
+                .filter(|candidate| incoming.iter().any(|v| schema_values_equal(v, candidate)))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            incoming.clone()
+        };
+        if values.is_empty() {
+            return Err(Diagnostic::invalid(
+                path,
+                "constraint intersection is empty",
+            ));
+        }
+        result.insert("enum".into(), Value::Array(values));
+    }
+    let merged = Value::Object(result);
+    compile_schema_permissive(&merged, path, false, 2)?;
+    Ok(canonicalize(merged))
+}
+
 fn resolve_mcp_binding(
     binding: &McpBinding,
     input: &Value,
@@ -1948,6 +2578,134 @@ tools:
     output: {kind: structured}
 "#
         .into()
+    }
+
+    fn v2_valid() -> String {
+        r#"version: 2
+server: {name: test, transport: {kind: stdio}}
+targets:
+  upstream:
+    kind: mcp
+    transport: {kind: stdio, command: /bin/fake-mcp, cwd: /}
+    limits: {timeout_ms: 1000, output_bytes: 1024, stderr_bytes: 1024}
+    expose:
+      get_current: {}
+      convert:
+        as: convert_public
+        restrict:
+          inputs:
+            timezone: {enum: [UTC, JST]}
+          fixed:
+            mode: utc
+"#
+        .into()
+    }
+
+    fn upstream_convert() -> Value {
+        serde_json::json!({
+            "name": "convert",
+            "description": "convert time",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "timezone": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["utc", "local"]},
+                    "optional": {"type": "integer"}
+                },
+                "required": ["timezone", "mode"],
+                "additionalProperties": false
+            }
+        })
+    }
+
+    #[test]
+    fn v2_exposure_derives_restricted_schema_and_fixed_call() {
+        let config = parse_config("test", v2_valid().as_bytes(), &env()).unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.tools.len(), 0);
+        assert!(matches!(
+            config.v2_exposures["get_current"].mode,
+            McpExposureMode::Proxy
+        ));
+        let exposure = &config.v2_exposures["convert_public"];
+        let public = derive_restricted_public_tool(exposure, &upstream_convert()).unwrap();
+        assert_eq!(public["name"], "convert_public");
+        assert_eq!(
+            public["inputSchema"]["required"],
+            serde_json::json!(["timezone"])
+        );
+        assert!(public["inputSchema"]["properties"].get("mode").is_none());
+        let call = resolve_v2_mcp(
+            &config,
+            "convert_public",
+            &public,
+            &serde_json::json!({"timezone": "UTC"}),
+        )
+        .unwrap();
+        assert_eq!(call.upstream_tool, "convert");
+        assert_eq!(call.output_kind, OutputKind::McpAuto);
+        assert_eq!(
+            call.arguments,
+            serde_json::json!({"timezone": "UTC", "mode": "utc"})
+        );
+    }
+
+    #[test]
+    fn v2_proxy_does_not_reject_against_stale_schema() {
+        let config = parse_config("test", v2_valid().as_bytes(), &env()).unwrap();
+        let upstream = serde_json::json!({
+            "name": "get_current",
+            "inputSchema": {"type": "object", "properties": {"new": {"type": "string"}}, "required": ["new"], "additionalProperties": false}
+        });
+        let public =
+            derive_restricted_public_tool(&config.v2_exposures["get_current"], &upstream).unwrap();
+        let call = resolve_v2_mcp(
+            &config,
+            "get_current",
+            &public,
+            &serde_json::json!({"arbitrary": true}),
+        )
+        .unwrap();
+        assert_eq!(call.arguments, serde_json::json!({"arbitrary": true}));
+    }
+
+    #[test]
+    fn v2_rejects_fixed_override_and_alias_collision() {
+        let config = parse_config("test", v2_valid().as_bytes(), &env()).unwrap();
+        let public = derive_restricted_public_tool(
+            &config.v2_exposures["convert_public"],
+            &upstream_convert(),
+        )
+        .unwrap();
+        assert!(
+            resolve_v2_mcp(
+                &config,
+                "convert_public",
+                &public,
+                &serde_json::json!({"timezone": "UTC", "mode": "local"}),
+            )
+            .is_err()
+        );
+        let collision = v2_valid().replace("as: convert_public", "as: get_current");
+        assert!(parse_config("test", collision.as_bytes(), &env()).is_err());
+    }
+
+    #[test]
+    fn v2_restriction_stays_frozen_for_unknown_change_but_stops_on_new_required_field() {
+        let config = parse_config("test", v2_valid().as_bytes(), &env()).unwrap();
+        let exposure = &config.v2_exposures["convert_public"];
+        let frozen = derive_restricted_public_tool(exposure, &upstream_convert()).unwrap();
+        let mut unknown_change = upstream_convert();
+        unknown_change["inputSchema"]["properties"]["optional"] =
+            serde_json::json!({"oneOf": [{"type": "integer"}, {"type": "string"}]});
+        assert!(restricted_compatibility(exposure, &frozen, &unknown_change));
+        unknown_change["inputSchema"]["required"] =
+            serde_json::json!(["timezone", "mode", "optional"]);
+        assert!(!restricted_compatibility(
+            exposure,
+            &frozen,
+            &unknown_change
+        ));
     }
 
     fn config_with_property_schema(schema: &str) -> String {
