@@ -228,8 +228,19 @@ fn main() {
                 "jsonrpc":"2.0", "id":id,
                 "error":{"code":-32601,"message":"method not found"}
             }),
+            ("legacy-invalid-params", "server/discover") => json!({
+                "jsonrpc":"2.0", "id":id,
+                "error":{"code":-32602,"message":"Invalid request parameters","data":""}
+            }),
+            ("legacy-invalid-params", "tools/list") => json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"tools":[
+                    {"name":"echo_arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}}
+                ]}
+            }),
             ("modern", "tools/call")
             | ("legacy", "tools/call")
+            | ("legacy-invalid-params", "tools/call")
             | ("legacy-restart", "tools/call")
             | ("catalog-noise", "tools/call") => call_result(&request, false),
             ("reuse", "tools/call") => {

@@ -100,6 +100,30 @@ async fn modern_and_legacy_discovery_use_the_same_call_path() {
 }
 
 #[tokio::test]
+async fn invalid_params_during_discover_falls_back_to_initialize_and_lists_tools() {
+    let invocation = invocation("legacy-invalid-params", OutputKind::Text);
+    let target = UpstreamMcpTarget {
+        id: invocation.target_id.clone(),
+        command: invocation.command.clone(),
+        args: invocation.args.clone(),
+        cwd: invocation.cwd.clone(),
+        environment: invocation.environment.clone(),
+        limits: invocation.limits.clone(),
+    };
+    let executor = McpExecutor::new();
+    let tools = executor
+        .list_tools(&target, &Cancellation::new())
+        .await
+        .expect("discover tools after invalid-params response");
+    assert_eq!(tools[0]["name"], "echo_arguments");
+    let result = executor
+        .execute(invocation)
+        .await
+        .expect("call after legacy initialization");
+    assert!(!result.is_error);
+}
+
+#[tokio::test]
 async fn target_process_is_reused_for_a_second_call() {
     let executor = McpExecutor::new();
     let first = executor
