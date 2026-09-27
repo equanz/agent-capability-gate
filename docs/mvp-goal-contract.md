@@ -1,8 +1,8 @@
-# MCP Capability Boundary MVP goal contract
+# Agent Capability Gate MVP goal contract
 
 ## 目的
 
-本contractは、準備済みの自律実行環境でMCP Capability BoundaryのMVPを実装し、規範、test、および実装のdriftを解消した状態まで一つのgoalで到達するための条件を定める。
+本contractは、準備済みの自律実行環境でAgent Capability GateのMVPを実装し、規範、test、および実装のdriftを解消した状態まで一つのgoalで到達するための条件を定める。
 
 このgoalは、remoteへpushされたbaseline SHAにある[製品設計](design.md)、[実装アーキテクチャ](implementation-design.md)、[検証設計](verification-design.md)、[自律開発設計](autonomous-development.md)、およびループ外で固定した本contractを規範入力とする。clone内の改訂は承認前の提案であり、goalの受入条件を変更しない。
 

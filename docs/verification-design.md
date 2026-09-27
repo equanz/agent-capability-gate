@@ -1,8 +1,8 @@
-# MCP Capability Boundary 検証設計
+# Agent Capability Gate 検証設計
 
 ## 目的
 
-本書は、[MCP Capability Boundary 設計](design.md)のE2E受入シナリオとプロパティ要件を、外部から観測可能な検証へ翻訳する。[実装アーキテクチャ](implementation-design.md)のcomponent名は検証対象の位置を示すために使うが、内部関数の直接呼び出しだけでE2E成功を代用しない。
+本書は、[Agent Capability Gate 設計](design.md)のE2E受入シナリオとプロパティ要件を、外部から観測可能な検証へ翻訳する。[実装アーキテクチャ](implementation-design.md)のcomponent名は検証対象の位置を示すために使うが、内部関数の直接呼び出しだけでE2E成功を代用しない。
 
 本書の既存 MCP fixture は設定 version 1 を対象とする。version 2 の proxy・restriction・catalog 変更と version 3 の live policy-derived catalog の受入条件は、それぞれ [version 2 設計](mcp-exposure-design.md) と [version 3 設計](mcp-exposure-v3-design.md) に定める。version 1 の「公開 catalog 不変」を新しい version の oracle に使わない。
 

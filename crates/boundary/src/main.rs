@@ -35,7 +35,7 @@ const EXIT_CONFIG: i32 = 3;
 const EXIT_RUNTIME: i32 = 4;
 
 #[derive(Debug, Parser)]
-#[command(name = "mcp-boundary", version, about = "MCP capability boundary")]
+#[command(name = "mcp-boundary", version, about = "Agent Capability Gate")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

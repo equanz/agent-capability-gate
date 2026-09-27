@@ -1,6 +1,6 @@
 ---
 name: author-capability-gate-config
-description: Create or review an MCP Capability Boundary config when an administrator needs to expose a narrowly defined CLI or upstream MCP capability to an LLM.
+description: Create or review an Agent Capability Gate config when an administrator needs to expose a narrowly defined CLI or upstream MCP capability to an LLM.
 ---
 
 # Author Capability Gate Config

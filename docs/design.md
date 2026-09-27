@@ -1,12 +1,12 @@
-# MCP Capability Boundary 設計
+# Agent Capability Gate 設計
 
 ## 目的
 
-本書では対象システムを仮称 MCP Capability Boundary と呼ぶ。製品名は本設計の一部としない。
+本書では製品を Agent Capability Gate と呼ぶ。名称は設計上の保証を表すものではない。
 
 本書の設定 I/F と MCP 公開規範は `version: 1` に適用する。設定 version 2 の MCP 公開は [MCP ツール公開 I/F（設定 version 2）](mcp-exposure-design.md)、version 3 は [MCP ツール公開 I/F（設定 version 3）](mcp-exposure-v3-design.md) に定める。各文書が明示的に置き換える範囲以外の境界は本書に従う。
 
-MCP Capability Boundary は、LLM に任意の CLI または upstream MCP server の権限を直接渡さず、管理者が明示した能力だけを別の MCP server として公開する。
+Agent Capability Gate は、LLM に任意の CLI または upstream MCP server の権限を直接渡さず、管理者が明示した能力だけを別の MCP server として公開する。
 
 本システムはツールの説明を改善するだけの wrapper ではなく、LLM から実行対象までの間に置かれる強制可能な trust boundary である。公開される入力、サーバーが補う固定値、呼び出せる実行対象、および結果として返せるデータ形式を設定から決定し、呼び出し時にも同じ制約を検証する。
 
@@ -58,7 +58,7 @@ MCP client / LLM
         | tools/list, tools/call
         v
 +------------------------------------+
-| MCP Capability Boundary            |
+| Agent Capability Gate              |
 |                                    |
 | 公開schema -> 入力検証               |
 |             -> binding -> 上限適用  |

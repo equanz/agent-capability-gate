@@ -1,4 +1,4 @@
-# MCP Capability Boundary User Guide
+# Agent Capability Gate User Guide
 
 ## Why this exists
 
@@ -20,11 +20,11 @@ flowchart LR
     A -->|"broad CLI / MCP arguments"| T["CLI or upstream MCP"]
 ```
 
-With MCP Capability Boundary, the agent receives only the configured tool interface. The administrator controls the accepted schema and fixed bindings, and the credential remains on the broker/target side of the boundary.
+With Agent Capability Gate, the agent receives only the configured tool interface. The administrator controls the accepted schema and fixed bindings, and the credential remains on the broker/target side of the boundary.
 
 ```mermaid
 flowchart LR
-    A["Coding agent"] -->|"typed MCP call"| B["MCP Capability Boundary<br/>admin-owned config"]
+    A["Coding agent"] -->|"typed MCP call"| B["Agent Capability Gate<br/>admin-owned config"]
     B -->|"fixed invocation"| T["CLI or upstream MCP<br/>credential outside agent"]
 ```
 

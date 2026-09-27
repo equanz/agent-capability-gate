@@ -1,8 +1,8 @@
-# MCP Capability Boundary
+# Agent Capability Gate
 
 You can tell a coding agent “use only this namespace” or “work only in this project.” But a broad CLI or MCP tool still lets it choose every namespace, project, and option. Direct CLI access may also require giving the agent a credential it can read and reuse. Prompts and command rules do not turn either problem into a mechanical boundary.
 
-MCP Capability Boundary turns one reviewed operation into the only interface an agent receives.
+Agent Capability Gate turns one reviewed operation into the only interface an agent receives.
 
 - Expose a narrow slice of an existing CLI or MCP server as a typed MCP tool.
 - Fix the operation, scope, arguments, environment, and credential authority under administrator control.
@@ -12,7 +12,7 @@ Read the [user guide](docs/usage.md) for the threat model, deployment boundary, 
 
 ```mermaid
 flowchart LR
-    A["Coding agent"] -->|"typed MCP call"| B["MCP Capability Boundary<br/>admin-owned config"]
+    A["Coding agent"] -->|"typed MCP call"| B["Agent Capability Gate<br/>admin-owned config"]
     B -->|"fixed argv / MCP arguments"| T["CLI or upstream MCP<br/>credential outside agent"]
 ```
 

@@ -2,7 +2,7 @@
 
 ## 目的
 
-本設計は、[MCP Capability Boundary 設計](design.md)と[実装アーキテクチャ](implementation-design.md)の実装、テスト、修正、および再検証を Codex が継続できる環境を定める。要件から検証への翻訳は[検証設計](verification-design.md)に定める。
+本設計は、[Agent Capability Gate 設計](design.md)と[実装アーキテクチャ](implementation-design.md)の実装、テスト、修正、および再検証を Codex が継続できる環境を定める。要件から検証への翻訳は[検証設計](verification-design.md)に定める。
 
 自律性は host への広い権限によって実現せず、外へ影響する操作だけを技術的に封じ、ローカルな試行錯誤はcommitを含めて許可することで実現する。ローカル成果の正しさは、ループが編集できない基準と独立した終了判定で確かめる。
 
@@ -104,7 +104,7 @@ command network の制御は、Web検索、外部MCP、app、connector、browser
 
 ### テスト対象
 
-MCP Capability Boundary とそこから起動される fake CLI および fake MCP は Codex command sandbox を継承する。ただし、outer sandbox が拒否したことを製品自身の検証成功として数えない。
+Agent Capability Gate とそこから起動される fake CLI および fake MCP は Codex command sandbox を継承する。ただし、outer sandbox が拒否したことを製品自身の検証成功として数えない。
 
 製品の引数写像、入力拒否、timeout、output 上限、secret redaction などは、test double の観測結果で検証する。製品自身へ OS sandbox 機能を追加する場合は、outer sandbox の影響を分離できる専用 container または VM で別途 conformance test を行う。
 
@@ -142,7 +142,7 @@ default_permissions = "mcp-boundary-loop"
 allow_login_shell = false
 
 [permissions.mcp-boundary-loop]
-description = "Offline autonomous development for MCP Capability Boundary."
+description = "Offline autonomous development for Agent Capability Gate."
 
 [permissions.mcp-boundary-loop.filesystem]
 ":root" = "deny"

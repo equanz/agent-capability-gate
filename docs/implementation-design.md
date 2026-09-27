@@ -1,8 +1,8 @@
-# MCP Capability Boundary 実装アーキテクチャ
+# Agent Capability Gate 実装アーキテクチャ
 
 ## 位置づけ
 
-本書は、[MCP Capability Boundary 設計](design.md)を実装可能な component、型、および状態遷移へ落とす。外部から観測できる振る舞いと security property は `design.md` を規範とし、本書はその意味を狭めない。両者が矛盾する場合は実装を進めず、`design.md` のレビューへ戻る。
+本書は、[Agent Capability Gate 設計](design.md)を実装可能な component、型、および状態遷移へ落とす。外部から観測できる振る舞いと security property は `design.md` を規範とし、本書はその意味を狭めない。両者が矛盾する場合は実装を進めず、`design.md` のレビューへ戻る。
 
 本書の MCP catalog と binding の詳細は設定 version 1 を対象とする。version 2 と 3 の MCP 公開は、それぞれ [version 2 設計](mcp-exposure-design.md) と [version 3 設計](mcp-exposure-v3-design.md) を規範とし、実装をこの文書の手書き写像へ回帰させない。
 

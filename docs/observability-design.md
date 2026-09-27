@@ -2,7 +2,7 @@
 
 ## 目的
 
-MCP Capability Boundary は、target 呼び出しの成否を operator が追跡できる最小限の debug 観測性を提供する。これは、MCP client への診断開示、監査記録、または target 出力の収集機能ではない。
+Agent Capability Gate は、target 呼び出しの成否を operator が追跡できる最小限の debug 観測性を提供する。これは、MCP client への診断開示、監査記録、または target 出力の収集機能ではない。
 
 ## 有効化と出力先
 
