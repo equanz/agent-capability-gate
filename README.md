@@ -86,7 +86,7 @@ mcp-boundary tools --config /absolute/path/git-history.yaml --format json
 
 When authoring a boundary for a real target, use the included [capability-config authoring skill](skills/author-capability-gate-config/SKILL.md). It guides the authority, target-semantics, deployment, and adversarial-input review that YAML validation cannot prove.
 
-## Upstream MCP example
+## Restrict an upstream MCP tool (version 3)
 
 Install the MCP reference Time server once under the administrator identity that owns the broker:
 
@@ -94,13 +94,13 @@ Install the MCP reference Time server once under the administrator identity that
 uv tool install mcp-server-time
 ```
 
-Set `command` to the absolute output of `command -v mcp-server-time`:
+Set `command` to the absolute path printed by `command -v mcp-server-time`:
 
 ```yaml
-version: 1
+version: 3
 
 server:
-  name: utc-clock
+  name: time-boundary
   transport: { kind: stdio }
 
 targets:
@@ -114,26 +114,22 @@ targets:
     limits:
       timeout_ms: 5000
       output_bytes: 65536
-      stderr_bytes: 4096
-
-tools:
-  current_time_utc:
-    description: Get the current time in UTC
-    input_schema:
-      type: object
-      additionalProperties: false
-      properties: {}
-      required: []
-    invoke:
-      target: time
-      mcp:
-        tool: get_current_time # Other upstream tools are not published.
-        arguments:
-          timezone: { literal: UTC } # The caller cannot select another timezone.
-    output: { kind: text }
+      stderr_bytes: 65536
+    expose:
+      convert_time:
+        description: Convert UTC time to an approved destination
+        restrict:
+          expose_unlisted_properties: false
+          properties:
+            time: {required: true}
+            target_timezone:
+              enum: [Asia/Tokyo, Europe/London] # The caller can choose only these destinations.
+            source_timezone:
+              fixed: UTC # The caller cannot change the source.
+      get_current_time: {} # Optional proxy; remove this entry to hide it.
 ```
 
-The upstream server may provide other tools and timezone inputs; they are not published by this configuration. Install or upgrade the upstream package outside the agent's authority, then validate the broker configuration before registering it.
+The restricted tool exposes only `time` and the two allowed destination timezones; the source stays fixed to UTC. The proxy is optional. Removing its entry hides it and makes calls through the boundary unavailable. The [Time server walkthrough](docs/usage.md#restrict-an-upstream-mcp-tool-version-3) includes the full configuration, validation, and Codex registration steps. Version 2 configurations remain supported with their separate frozen-schema behavior; see the [version 2 specification](docs/mcp-exposure-design.md).
 
 ## Run
 

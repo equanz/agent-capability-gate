@@ -34,11 +34,11 @@ A configuration declares:
 
 1. trusted CLI or upstream MCP targets;
 2. the public tools an agent may see;
-3. a closed input schema for each public tool;
-4. how validated inputs and administrator-owned values map to CLI argv or upstream MCP arguments; and
+3. for an upstream MCP tool, whether to proxy it or restrict its properties;
+4. the closed caller inputs and administrator-owned values that determine CLI argv or upstream MCP arguments; and
 5. time and output limits for every target.
 
-The broker validates the entire configuration at startup. For each call it validates the public input again, resolves one fixed invocation, and only then starts or calls the target. It never constructs a shell command string.
+The broker validates the entire configuration at startup and checks each call against the published policy before invoking a target. Version 3 derives restricted inputs from the current upstream schema and administrator policy. Version 2 configurations remain supported with their distinct frozen-schema behavior; see the [version 2 specification](mcp-exposure-design.md). Proxies expose one selected upstream tool and let that server validate its arguments. CLI execution never constructs a shell command string.
 
 This boundary is only meaningful when the agent cannot modify the broker, configuration, target, or MCP registration and cannot bypass the broker with the same credentials. Placement outside a workspace is not enough if the agent's OS identity can replace the file, change a parent directory, follow a writable symlink, or invoke the target directly with the broker credential.
 
@@ -53,6 +53,70 @@ cargo install --locked --path crates/boundary --bin mcp-boundary
 Cargo downloads missing dependencies from the configured registry.
 
 For development, `cargo build --locked -p mcp-boundary --bin mcp-boundary` uses the same registry. The offline verification entry point is `./verify all`, which requires a prepared `vendor/` directory.
+
+## Restrict an upstream MCP tool (version 3)
+
+This example gives the agent a bounded Time server operation: it supplies a time and selects Tokyo or London, while the source timezone is fixed to UTC. A second, unchanged tool is included as an optional proxy.
+
+Install the upstream server once and note its absolute executable path:
+
+```sh
+uv tool install mcp-server-time
+command -v mcp-server-time
+command -v mcp-boundary
+```
+
+Create `/absolute/path/time-boundary.yaml`, replacing the two command paths with the paths printed above:
+
+```yaml
+version: 3
+
+server:
+  name: time-boundary
+  transport: { kind: stdio }
+
+targets:
+  time:
+    kind: mcp
+    transport:
+      kind: stdio
+      command: /absolute/path/to/mcp-server-time
+      args: []
+      cwd: /
+    limits:
+      timeout_ms: 5000
+      output_bytes: 65536
+      stderr_bytes: 65536
+    expose:
+      convert_time:
+        description: Convert a UTC time to an approved destination timezone
+        restrict:
+          expose_unlisted_properties: false
+          properties:
+            time:
+              required: true
+              description: Time of day in 24-hour HH:MM format
+            target_timezone:
+              enum: [Asia/Tokyo, Europe/London]
+              description: Approved destination timezone
+            source_timezone:
+              fixed: UTC # The agent cannot change the source timezone.
+      get_current_time: {} # Optional proxy; remove this entry to hide it.
+```
+
+Validate the configuration and register the second executable path as a Codex STDIO MCP server:
+
+```sh
+mcp-boundary check --config /absolute/path/time-boundary.yaml
+codex mcp add time-boundary -- \
+  /absolute/path/to/mcp-boundary serve \
+  --config /absolute/path/time-boundary.yaml
+codex mcp get time-boundary
+```
+
+After starting a new Codex session, `convert_time` should expose only `time` and `target_timezone`; `source_timezone` is fixed to UTC. A call with another destination, a caller-supplied source timezone, or an unknown argument is rejected before reaching the upstream server. `get_current_time` keeps its upstream schema; remove its `expose` entry to hide it. Remove the trial registration with `codex mcp remove time-boundary`.
+
+This target has no launch arguments or configured environment, so its upstream tool definitions may be cached persistently. The broker applies the current policy when using cached definitions; the cache is not an approval record. Protect the config and cache from agent writes as part of deployment. Version 2 configurations remain supported with their distinct frozen-schema behavior; see the [version 2 specification](mcp-exposure-design.md). For the full policy, cache, and failure semantics, see the [version 3 design](mcp-exposure-v3-design.md).
 
 ## Define a CLI capability
 
@@ -226,6 +290,8 @@ The supported JSON Schema subset includes:
 - `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, and `pattern`.
 
 Every public schema has an object root. Every declared object property is required, and every object is closed. Optional properties, `default`, `format`, `const`, `$ref`, `$defs`, unions, negation, and conditional schemas are not supported. Split meaningfully different shapes into separate public tools.
+
+Version 2 MCP restrictions freeze a public schema derived from a compatible upstream definition. Version 3 restrictions instead apply the current `properties` policy to the current upstream definition and cache upstream metadata. Both versions reject unknown caller fields and rebuild upstream arguments only from allowed values and fixed values. The supported schema subset and cache/change behavior differ by configuration version; see the [version 2](mcp-exposure-design.md) and [version 3](mcp-exposure-v3-design.md) specifications.
 
 Patterns use a linear-time regular-expression engine. They follow JSON Schema's partial-match behavior, so use anchors when the entire string must match.
 

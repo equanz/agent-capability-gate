@@ -4,7 +4,7 @@
 
 本書は、[MCP Capability Boundary 設計](design.md)のE2E受入シナリオとプロパティ要件を、外部から観測可能な検証へ翻訳する。[実装アーキテクチャ](implementation-design.md)のcomponent名は検証対象の位置を示すために使うが、内部関数の直接呼び出しだけでE2E成功を代用しない。
 
-本書の既存 MCP fixture は設定 version 1 を対象とする。version 2 の proxy・restriction・catalog 変更の受入条件は [MCP ツール公開 I/F](mcp-exposure-design.md) に定め、version 1 の「公開 catalog 不変」を version 2 の oracle に使わない。
+本書の既存 MCP fixture は設定 version 1 を対象とする。version 2 の proxy・restriction・catalog 変更と version 3 の live policy-derived catalog の受入条件は、それぞれ [version 2 設計](mcp-exposure-design.md) と [version 3 設計](mcp-exposure-v3-design.md) に定める。version 1 の「公開 catalog 不変」を新しい version の oracle に使わない。
 
 test codeとfixtureは実装とともに変更できる。本書は「何を、どの境界から、何を観測して判定するか」を規定する。個別test名との対応は変更可能なmachine-readable manifestに置き、goal終端で本書とtest実体のdriftを再検査する。
 
@@ -116,7 +116,7 @@ verify all
 
 `verify all`はformat、lint、unit、property、E2E、およびrequirementsを包含し、途中失敗を成功へ変換しない。全commandはnetworkなし、候補の`Cargo.lock`を`--locked --offline`で使い、repository-local temporary directoryで実行できる。clone内の`verify`は改善できるが、自己申告の成功だけで完了を判定しない。
 
-`verify requirements`は変更可能な`tests/requirements.toml`を読み、P01からP20とE01からE17がそれぞれ一回以上、存在するtestまたは明示的なreview criterionへ対応していることを構文的に確認する。ID記載だけでは意味的なcoverageを証明しないため、goal終端のfinal reviewを省略しない。
+`verify requirements`は変更可能な`tests/requirements.toml`を読み、P01からP20とE01からE23がそれぞれ一回以上、存在するtestまたは明示的なreview criterionへ対応していることを構文的に確認する。ID記載だけでは意味的なcoverageを証明しないため、goal終端のfinal reviewを省略しない。
 
 property testはcase数とseedを固定入力として受け、失敗時にseedと縮小済みcounterexampleをreportへ残す。通常の`verify all`は再現可能な既定seedを使う。追加seedによる探索は補助検証であり、既定seedの成功を置き換えない。
 
@@ -168,6 +168,12 @@ property testはcase数とseedを固定入力として受け、失敗時にseed�
 | E15 | CLI＋MCP E2E | secret sentinelを含むenvironmentとtarget error、debug無効／有効の公開call | broker生成resultとstderrにsentinelなし。debug有効時だけ一call一つの安全なJSON eventを出し、stdoutはMCP wireだけを保つ |
 | E16 | raw MCP E2E | modernとlegacy clientから同じcall | catalog、validation、resolved invocationの意味が同一 |
 | E17 | MCP process E2E | modern、legacy同一process、legacy再起動mode | negotiation成功、tool request一回、revisionによるbinding差なし |
+| E18 | version 3 raw MCP E2E | proxy・restriction・未選択toolへの直接call、fixed上書き、未知argument、追加制約、version固有policy | allowlistと閉じたschemaが公開され、許可値とfixed値だけがupstreamへ届き、v2/v3構文を混同しない |
+| E19 | version 3 raw MCP E2E | optional / required propertyの追加、required欠落、設定propertyの消失、unsupported schema、`list_changed` | 許可された変更だけを取り込み、非互換toolは同名stubと安定errorに残し、proxy fallbackなしでupstream invocation 0 |
+| E20 | version 3 raw MCP E2E | 同一接続の繰返しlist/call、定義変更通知、policy config変更、target identity変更、cache書き込み失敗、outageと回復 | upstream定義のcache再利用・再投影・identity missが観測でき、書き込み失敗時もfresh catalogを使い、更新後のcatalogを通知より先に採用する |
+| E21 | version 3 raw MCP E2E | transient outage、policy mismatch、unsupported schema、upstream call rejection | `TARGET_UNAVAILABLE`、`ADMIN_ACTION_REQUIRED`、upstream failureを混同せず、古い定義でtarget callしない |
+| E22 | version 3 raw MCP E2E | fixed value・caller argument・tool resultを含むcall後のcache内容と、credential-bearing environment / launch argumentsを持つtargetのcache path | cacheにはupstream定義だけが残り、fixed value、call argument、result、environment値やlaunch argumentの決定的fingerprintは含まれない |
+| E23 | architecture review + concurrent snapshot test | config/cacheの親directoryとOS権限、複数targetの再取得中の並行list/call、採用前後のtool state | permission分離はdeployment所有でruntimeが検査しない。全target projectionを一世代として採用し、並行readerが混在catalogを見ず、callが捕捉したtool stateをvalidationからargument再構成まで保持する。list responseと更新通知の順序も直列化する |
 
 ## プロパティ要件の対応
 
@@ -196,7 +202,7 @@ property testはcase数とseedを固定入力として受け、失敗時にseed�
 
 ## drift検査
 
-goal終端では、testからrequirementを集計するだけでなく、P01からP20、E01からE17の順に規範から検証実体を読む。各IDについて次を確認する。
+goal終端では、testからrequirementを集計するだけでなく、P01からP20、E01からE23の順に規範から検証実体を読む。各IDについて次を確認する。
 
 1. 刺激が要件の境界値と失敗modeを含む。
 2. assertionが単なる成功終了でなく、規範が要求する観測を検査する。

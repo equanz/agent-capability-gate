@@ -4,7 +4,7 @@
 
 本書では対象システムを仮称 MCP Capability Boundary と呼ぶ。製品名は本設計の一部としない。
 
-本書の設定 I/F と MCP 公開規範は `version: 1` に適用する。次の設定 version で採用する MCP ツール公開の規範は [MCP ツール公開 I/F](mcp-exposure-design.md) に定める。同文書が明示的に置き換える範囲以外の境界は本書に従う。
+本書の設定 I/F と MCP 公開規範は `version: 1` に適用する。設定 version 2 の MCP 公開は [MCP ツール公開 I/F（設定 version 2）](mcp-exposure-design.md)、version 3 は [MCP ツール公開 I/F（設定 version 3）](mcp-exposure-v3-design.md) に定める。各文書が明示的に置き換える範囲以外の境界は本書に従う。
 
 MCP Capability Boundary は、LLM に任意の CLI または upstream MCP server の権限を直接渡さず、管理者が明示した能力だけを別の MCP server として公開する。
 
