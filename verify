@@ -41,6 +41,7 @@ case "$command" in
         cargo_locked test -p mcp-boundary --test upstream_e2e
         cargo_locked test -p mcp-boundary --test public_upstream_e2e
         cargo_locked test -p mcp-boundary --test v2_exposure_e2e
+        cargo_locked test -p mcp-boundary --test v3_exposure_e2e
         ;;
     requirements)
         node scripts/verify-requirements.js

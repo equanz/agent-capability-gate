@@ -12,7 +12,7 @@ if (!fs.existsSync(manifest)) {
 const text = fs.readFileSync(manifest, 'utf8');
 const required = [
   ...Array.from({ length: 20 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`),
-  ...Array.from({ length: 17 }, (_, i) => `E${String(i + 1).padStart(2, '0')}`),
+  ...Array.from({ length: 23 }, (_, i) => `E${String(i + 1).padStart(2, '0')}`),
 ];
 
 function parseString(value, field, line) {

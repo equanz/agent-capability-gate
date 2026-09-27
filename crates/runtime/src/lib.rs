@@ -352,6 +352,25 @@ impl McpExecutor {
         changed
     }
 
+    /// Whether the target currently has a live negotiated process. A lock
+    /// already held by a request means the same connection is in use, so do
+    /// not force a competing discovery merely to inspect it.
+    pub async fn is_connected(&self, target_id: &str) -> bool {
+        let target = self.targets.lock().await.get(target_id).cloned();
+        let Some(target) = target else { return false };
+        let Ok(mut actor) = target.actor.try_lock() else {
+            return true;
+        };
+        let Some(ready) = actor.ready.as_mut() else {
+            return false;
+        };
+        ready
+            .process
+            .child
+            .try_wait()
+            .is_ok_and(|status| status.is_none())
+    }
+
     /// Execute one resolved upstream invocation.  A target has no waiting
     /// queue: a second call while its actor is active receives SERVER_BUSY.
     pub async fn execute(

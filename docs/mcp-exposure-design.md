@@ -1,5 +1,7 @@
 # MCP ツール公開 I/F（設定 version 2）
 
+本書は `version: 2` の互換動作を記す。[MCP ツール公開 I/F（設定 version 3）](mcp-exposure-v3-design.md) は別の明示的な設定 version として扱い、この version 2 の `inputs` / `fixed` 構文や freeze の lifecycle を version 3 の規範へ持ち込まない。
+
 ## 目的と境界
 
 管理者が選んだ upstream MCP ツールだけを公開する。選ばなかったツールは `tools/list` に現れず、名前を直接指定した `tools/call` でも実行できない。MCP client 側の enabled / approved 設定は、この公開判断の代わりにならない。

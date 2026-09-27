@@ -8,11 +8,42 @@ use std::time::Duration;
 /// intentionally implements the line framing expected by the runtime actor,
 /// and never starts a shell or opens a network connection.
 fn main() {
-    let mode = env::args().nth(1).unwrap_or_else(|| "legacy".into());
-    let marker =
-        env::args().find_map(|argument| argument.strip_prefix("--marker=").map(str::to_owned));
-    let stderr_marker =
-        env::args().find_map(|argument| argument.strip_prefix("--stderr=").map(str::to_owned));
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let v3_fixture_directory = env::current_dir()
+        .ok()
+        .filter(|directory| directory.join(".v3-fixture").is_file());
+    let mode = arguments.first().cloned().unwrap_or_else(|| {
+        if v3_fixture_directory.is_some() {
+            "v3-fixture".into()
+        } else {
+            "legacy".into()
+        }
+    });
+    let marker = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("--marker=").map(str::to_owned))
+        .or_else(|| {
+            v3_fixture_directory.as_ref().map(|directory| {
+                directory
+                    .join("upstream-state")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        });
+    let stderr_marker = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("--stderr=").map(str::to_owned));
+    let events_path = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("--events=").map(str::to_owned))
+        .or_else(|| {
+            v3_fixture_directory.as_ref().map(|directory| {
+                directory
+                    .join("upstream-events")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        });
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout());
     let mut call_number = 0usize;
@@ -62,6 +93,46 @@ fn main() {
         {
             break;
         }
+        if mode == "v3-fixture"
+            && matches!(method, "server/discover" | "initialize")
+            && marker.as_deref().is_some_and(|path| {
+                std::fs::read_to_string(path).is_ok_and(|state| state == "offline")
+            })
+        {
+            break;
+        }
+        if mode == "v3-fixture"
+            && matches!(method, "tools/list" | "tools/call")
+            && let Some(events_path) = events_path.as_deref()
+        {
+            let event = if method == "tools/list" {
+                "list".to_owned()
+            } else {
+                let name = request
+                    .get("params")
+                    .and_then(|params| params.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                format!("call:{name}")
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(events_path)
+                .expect("open v3 event log");
+            writeln!(file, "{event}").expect("record v3 event");
+        }
+        if mode == "v3-fixture"
+            && method == "tools/call"
+            && marker.as_deref().is_some_and(|path| {
+                std::fs::read_to_string(path).is_ok_and(|state| state.starts_with("notify-"))
+            })
+        {
+            let notification = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+            let _ = serde_json::to_writer(&mut stdout, &notification);
+            let _ = stdout.write_all(b"\n");
+            let _ = stdout.flush();
+        }
         if mode == "legacy-restart"
             && method == "server/discover"
             && let Some(marker) = marker.as_deref()
@@ -108,6 +179,61 @@ fn main() {
                 "jsonrpc":"2.0", "id":id,
                 "result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{"listChanged":true}}}
             }),
+            ("v3-fixture", "server/discover") => json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{"listChanged":true}}}
+            }),
+            ("v3-fixture", "tools/list") => {
+                let state = marker
+                    .as_deref()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_default();
+                let mut properties = json!({
+                    "time":{"type":"string"},
+                    "timezone":{"type":"string","enum":["UTC","JST","PST"]},
+                    "source_timezone":{"type":"string"},
+                    "optional_note":{"type":"string"},
+                    "future_optional":{"type":"boolean"}
+                });
+                let mut required = json!(["time", "source_timezone"]);
+                if state.starts_with("new-required") || state.starts_with("notify-required") {
+                    properties["admin"] = json!({"type":"string"});
+                    required.as_array_mut().unwrap().push(json!("admin"));
+                }
+                if state.starts_with("missing-selected") {
+                    properties.as_object_mut().unwrap().remove("timezone");
+                }
+                let mut convert_schema = json!({
+                    "type":"object",
+                    "properties":properties,
+                    "required":required,
+                    "additionalProperties":false
+                });
+                if state.starts_with("unsupported-schema") {
+                    convert_schema["$ref"] = json!("#/$defs/convert");
+                }
+                let mut tools = vec![
+                    json!({"name":"convert","description":"Convert time","inputSchema":convert_schema}),
+                    json!({"name":"get_current_time","description":"Current time","inputSchema":{"type":"object","properties":{"timezone":{"type":"string"}},"required":["timezone"],"additionalProperties":false}}),
+                    json!({"name":"unselected","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+                ];
+                if state.starts_with("missing-tool") {
+                    tools
+                        .retain(|tool| tool.get("name").and_then(Value::as_str) != Some("convert"));
+                }
+                json!({"jsonrpc":"2.0","id":id,"result":{"tools":tools}})
+            }
+            ("v3-fixture", "tools/call") => {
+                let state = marker
+                    .as_deref()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_default();
+                if state == "reject-call" {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"arguments rejected"}})
+                } else {
+                    call_result(&request, true)
+                }
+            }
             ("v2-catalog" | "v2-switchable", "tools/list") => json!({
                 "jsonrpc":"2.0", "id":id,
                 "result":{"tools":[
@@ -324,6 +450,14 @@ fn main() {
         if stdout.write_all(&encoded).is_err()
             || stdout.write_all(b"\n").is_err()
             || stdout.flush().is_err()
+        {
+            break;
+        }
+        if mode == "v3-fixture"
+            && method == "tools/call"
+            && marker.as_deref().is_some_and(|path| {
+                std::fs::read_to_string(path).is_ok_and(|state| state == "close-after-call")
+            })
         {
             break;
         }

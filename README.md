@@ -149,6 +149,7 @@ The executable, configuration, target programs, MCP registration, and credential
 
 - [User guide](docs/usage.md): motivation, configuration, deployment, and current constraints
 - [System design](docs/design.md): normative behavior and trust boundaries
+- [Version 3 MCP exposure design](docs/mcp-exposure-v3-design.md): upstream-derived schemas, property restrictions, and cache behavior
 - [Observability](docs/observability-design.md): opt-in debug events and information boundaries
 - [Verification](docs/verification-design.md): acceptance scenarios and test strategy
 - [Capability-config authoring skill](skills/author-capability-gate-config/SKILL.md): review a target and its deployment before publishing it to an agent

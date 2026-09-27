@@ -1,13 +1,15 @@
 //! Management CLI and the public STDIO boundary.
 
 mod catalog_cache;
+mod upstream_definition_cache;
 mod v2_catalog;
+mod v3_catalog;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mcp_boundary_core::{
     BrokerErrorCode, Diagnostic, MAX_ARRAY_ITEMS, MAX_STRING_BYTES, ResolvedCliInvocation,
     ResolvedMcpInvocation, ValidatedConfig, parse_config, resolve_cli, resolve_mcp, resolve_v2_mcp,
-    serde_json, tools_json,
+    resolve_v3_mcp, serde_json, tools_json,
 };
 use mcp_boundary_runtime::{
     Admission, Cancellation, ExecutionResult, McpExecutor, RuntimeError, TargetExit,
@@ -25,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 use v2_catalog::V2Catalog;
+use v3_catalog::{ListedToolState, V3Catalog};
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USAGE: i32 = 2;
@@ -73,6 +76,7 @@ enum PublicRevision {
 struct LoadedConfig {
     config: ValidatedConfig,
     catalog_cache: Option<catalog_cache::CatalogCache>,
+    v3_caches: BTreeMap<String, upstream_definition_cache::UpstreamDefinitionCache>,
 }
 
 /// Opt-in operator diagnostics for completed public tool calls. Target stderr
@@ -260,6 +264,9 @@ fn run_tools(config_path: &str, _format: OutputFormat) -> i32 {
             let catalog = if loaded.config.version == 2 {
                 let config = Arc::new(loaded.config);
                 V2Catalog::new(config, loaded.catalog_cache).management_json()
+            } else if loaded.config.version == 3 {
+                let config = Arc::new(loaded.config);
+                V3Catalog::new(config, loaded.v3_caches).management_json()
             } else {
                 tools_json(&loaded.config)
             };
@@ -332,9 +339,23 @@ fn load_config(config_path: &str) -> Result<LoadedConfig, Diagnostic> {
     let catalog_cache = (config.version == 2)
         .then(|| catalog_cache::CatalogCache::new(path, &bytes).ok())
         .flatten();
+    let v3_caches = if config.version == 3 {
+        config
+            .upstream_targets
+            .iter()
+            .filter_map(|(target_id, target)| {
+                upstream_definition_cache::UpstreamDefinitionCache::new(target)
+                    .ok()
+                    .map(|cache| (target_id.clone(), cache))
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
     Ok(LoadedConfig {
         config,
         catalog_cache,
+        v3_caches,
     })
 }
 
@@ -440,6 +461,8 @@ async fn serve_stdio(loaded: LoadedConfig) -> Result<(), Diagnostic> {
     let config = Arc::new(loaded.config);
     let v2_catalog = (config.version == 2)
         .then(|| Arc::new(V2Catalog::new(Arc::clone(&config), loaded.catalog_cache)));
+    let v3_catalog = (config.version == 3)
+        .then(|| Arc::new(V3Catalog::new(Arc::clone(&config), loaded.v3_caches)));
     let debug = DebugLogger::from_environment();
     let admission = Admission::new();
     let cancellation = Cancellation::new();
@@ -530,6 +553,7 @@ async fn serve_stdio(loaded: LoadedConfig) -> Result<(), Diagnostic> {
         let context = RequestContext {
             config: Arc::clone(&config),
             v2_catalog: v2_catalog.clone(),
+            v3_catalog: v3_catalog.clone(),
             stdout: Arc::clone(&stdout),
             mcp: mcp.clone(),
             admission: admission.clone(),
@@ -756,6 +780,7 @@ fn validate_params(method: &str, params: &Value) -> Option<&'static str> {
 struct RequestContext {
     config: Arc<ValidatedConfig>,
     v2_catalog: Option<Arc<V2Catalog>>,
+    v3_catalog: Option<Arc<V3Catalog>>,
     stdout: Arc<AsyncMutex<io::BufWriter<io::Stdout>>>,
     mcp: McpExecutor,
     admission: Admission,
@@ -768,6 +793,7 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
     let RequestContext {
         config,
         v2_catalog,
+        v3_catalog,
         stdout,
         mcp,
         admission,
@@ -785,7 +811,9 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
     let mut debug_call = if method == "tools/call" {
         let name = params.get("name").and_then(Value::as_str);
         let known_tool = name.filter(|name| {
-            config.tools.contains_key(*name) || config.v2_exposures.contains_key(*name)
+            config.tools.contains_key(*name)
+                || config.v2_exposures.contains_key(*name)
+                || config.v3_exposures.contains_key(*name)
         });
         let target = known_tool.and_then(|name| {
             config
@@ -795,6 +823,12 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                 .or_else(|| {
                     config
                         .v2_exposures
+                        .get(name)
+                        .map(|tool| tool.target_id.as_str())
+                })
+                .or_else(|| {
+                    config
+                        .v3_exposures
                         .get(name)
                         .map(|tool| tool.target_id.as_str())
                 })
@@ -846,7 +880,7 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                         PublicRevision::Modern => "2026-07-28",
                         PublicRevision::Legacy => "2025-11-25",
                     },
-                    "capabilities": {"tools": if v2_catalog.is_some() { json!({"listChanged":true}) } else { json!({}) }},
+                    "capabilities": {"tools": if v2_catalog.is_some() || v3_catalog.is_some() { json!({"listChanged":true}) } else { json!({}) }},
                     "serverInfo": {"name": config.server_name, "version": env!("CARGO_PKG_VERSION")}
                 }),
             )
@@ -869,7 +903,7 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                 id,
                 json!({
                     "protocolVersion": "2026-07-28",
-                    "capabilities": {"tools": if v2_catalog.is_some() { json!({"listChanged":true}) } else { json!({}) }},
+                    "capabilities": {"tools": if v2_catalog.is_some() || v3_catalog.is_some() { json!({"listChanged":true}) } else { json!({}) }},
                     "serverInfo": {"name": config.server_name, "version": env!("CARGO_PKG_VERSION")}
                 }),
             )
@@ -912,6 +946,13 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
                     if changed {
                         write_list_changed(&stdout).await?;
                     }
+                } else if let Some(catalog) = &v3_catalog {
+                    let _sequence = catalog.downstream_sequence().await;
+                    let refreshed = catalog.refresh_all(&mcp, &cancellation).await;
+                    write_result(&stdout, id, refreshed.response).await?;
+                    if refreshed.changed {
+                        write_list_changed(&stdout).await?;
+                    }
                 } else {
                     write_result(&stdout, id, tools_json(&config)).await?;
                 }
@@ -941,6 +982,163 @@ async fn handle_request(context: RequestContext, request: Value) -> Result<(), D
             if cancellation.is_cancelled() {
                 debug_call.rejected(BrokerErrorCode::TargetUnavailable);
                 write_error(&stdout, id, "TARGET_UNAVAILABLE", "broker is shutting down").await?;
+                return Ok(());
+            }
+            if let Some(exposure) = config.v3_exposures.get(name) {
+                let catalog = v3_catalog
+                    .as_ref()
+                    .expect("version-3 catalog exists for version-3 exposure");
+                let sequence = catalog.downstream_sequence().await;
+                let refresh = catalog
+                    .refresh_for_call(&exposure.target_id, name, &mcp, &cancellation)
+                    .await;
+                if refresh.changed {
+                    write_list_changed(&stdout).await?;
+                }
+                if !refresh.available {
+                    debug_call.rejected(BrokerErrorCode::TargetUnavailable);
+                    write_v3_tool_error_async(
+                        &stdout,
+                        id,
+                        "TARGET_UNAVAILABLE",
+                        "upstream tool metadata is unavailable; retry when the upstream is reachable",
+                        json!({
+                            "code":"TARGET_UNAVAILABLE",
+                            "reason":"UPSTREAM_UNAVAILABLE",
+                            "retryable":true,
+                            "action":"RETRY",
+                            "tool":name
+                        }),
+                        *revision.lock().await,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let Some(tool_state) = refresh.tool_state else {
+                    debug_call.rejected(BrokerErrorCode::TargetUnavailable);
+                    write_error(
+                        &stdout,
+                        id,
+                        "TARGET_UNAVAILABLE",
+                        "upstream tool metadata is unavailable",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                let public_tool = match tool_state {
+                    ListedToolState::Ready(tool) => tool,
+                    ListedToolState::Blocked { reason, .. } => {
+                        debug_call.rejected(BrokerErrorCode::AdminActionRequired);
+                        write_v3_tool_error_async(
+                            &stdout,
+                            id,
+                            "ADMIN_ACTION_REQUIRED",
+                            &format!(
+                                "{name}: upstream definition is incompatible ({}) ; stop retrying and report this tool and reason to the administrator",
+                                reason.as_str()
+                            ),
+                            json!({
+                                "code":"ADMIN_ACTION_REQUIRED",
+                                "reason":reason.as_str(),
+                                "retryable":false,
+                                "action":"CONTACT_ADMIN",
+                                "tool":name
+                            }),
+                            *revision.lock().await,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    ListedToolState::Unavailable(_) => {
+                        debug_call.rejected(BrokerErrorCode::TargetUnavailable);
+                        write_v3_tool_error_async(
+                            &stdout,
+                            id,
+                            "TARGET_UNAVAILABLE",
+                            "upstream tool metadata is unavailable; retry when the upstream is reachable",
+                            json!({
+                                "code":"TARGET_UNAVAILABLE",
+                                "reason":"UPSTREAM_UNAVAILABLE",
+                                "retryable":true,
+                                "action":"RETRY",
+                                "tool":name
+                            }),
+                            *revision.lock().await,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                match resolve_v3_mcp(&config, name, &public_tool, &arguments) {
+                    Ok(invocation) => {
+                        drop(sequence);
+                        match mcp
+                            .execute_with_cancellation(invocation, &cancellation)
+                            .await
+                        {
+                            Ok(result) => {
+                                if result.is_error {
+                                    debug_call.error_with_observation(
+                                        result.code,
+                                        result.observation.clone(),
+                                    );
+                                } else {
+                                    debug_call.success_with_observation(result.observation.clone());
+                                }
+                                let _sequence = catalog.downstream_sequence().await;
+                                if mcp.take_list_changed(&exposure.target_id).await {
+                                    let refreshed = catalog
+                                        .refresh_after_notification(
+                                            &exposure.target_id,
+                                            &mcp,
+                                            &cancellation,
+                                        )
+                                        .await;
+                                    if refreshed.changed {
+                                        write_list_changed(&stdout).await?;
+                                    }
+                                }
+                                write_execution(&stdout, id, result, *revision.lock().await)
+                                    .await?;
+                            }
+                            Err(error) => {
+                                debug_call
+                                    .error_with_observation(error.code, error.observation.clone());
+                                let _sequence = catalog.downstream_sequence().await;
+                                if mcp.take_list_changed(&exposure.target_id).await {
+                                    let refreshed = catalog
+                                        .refresh_after_notification(
+                                            &exposure.target_id,
+                                            &mcp,
+                                            &cancellation,
+                                        )
+                                        .await;
+                                    if refreshed.changed {
+                                        write_list_changed(&stdout).await?;
+                                    }
+                                }
+                                write_runtime_error_async(
+                                    &stdout,
+                                    id,
+                                    error,
+                                    *revision.lock().await,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        debug_call.rejected(error.code);
+                        write_tool_error_async(
+                            &stdout,
+                            id,
+                            error.code.as_str(),
+                            &error.message,
+                            *revision.lock().await,
+                        )
+                        .await?;
+                    }
+                }
                 return Ok(());
             }
             if let Some(exposure) = config.v2_exposures.get(name) {
@@ -1174,6 +1372,27 @@ async fn write_tool_error_async(
 ) -> Result<(), Diagnostic> {
     let mut stdout = stdout.lock().await;
     write_tool_error(&mut stdout, id, code, message, revision)
+}
+
+async fn write_v3_tool_error_async(
+    stdout: &Arc<AsyncMutex<io::BufWriter<io::Stdout>>>,
+    id: Option<Value>,
+    code: &str,
+    message: &str,
+    details: Value,
+    revision: PublicRevision,
+) -> Result<(), Diagnostic> {
+    let mut stdout = stdout.lock().await;
+    let result = add_revision_fields(
+        json!({
+            "content":[{"type":"text","text":format!("{code}: {message}")}],
+            "structuredContent":details,
+            "isError":true,
+            "resultType":"complete"
+        }),
+        revision,
+    );
+    write_json_result(&mut stdout, id, result)
 }
 
 async fn write_runtime_error_async(

@@ -261,3 +261,45 @@ kind = "test"
 status = "covered"
 references = ["crates/boundary/tests/public_upstream_e2e.rs::public_stdio_calls_modern_and_legacy_upstreams_with_fixed_binding", "crates/boundary/tests/public_upstream_e2e.rs::public_legacy_discovery_restarts_once_and_calls_once"]
 criterion = "Upstream E2E covers modern discovery, legacy fallback, the permitted legacy restart, exactly-once tool request behavior, and revision-independent fixed binding."
+
+[[requirement]]
+id = "E18"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/v3_exposure_e2e.rs::v3_restriction_proxy_cache_and_same_connection_reuse_are_enforced", "crates/boundary/tests/v3_exposure_e2e.rs::v3_unlisted_additions_block_or_become_inputs_only_when_explicitly_allowed", "crates/boundary/tests/v3_exposure_e2e.rs::v3_optional_properties_stay_optional_and_required_true_promotes_one", "crates/core/src/lib.rs::v2_and_v3_restriction_syntaxes_are_not_interchangeable", "crates/core/src/lib.rs::v3_property_rules_reject_conflicting_or_unsupported_modes"]
+criterion = "Raw version-3 MCP calls observe the selected proxy/restriction surface, closed argument validation, fixed-value insertion, upstream argument reconstruction, and unlisted-property policy; unit coverage ensures version-2 syntax is not accepted as version 3."
+
+[[requirement]]
+id = "E19"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/v3_exposure_e2e.rs::v3_unlisted_additions_block_or_become_inputs_only_when_explicitly_allowed", "crates/boundary/tests/v3_exposure_e2e.rs::v3_notification_rebuilds_then_blocks_without_proxy_fallback", "crates/boundary/tests/v3_exposure_e2e.rs::v3_unsupported_schema_is_listed_as_blocked_without_proxy_fallback", "crates/boundary/tests/v3_exposure_e2e.rs::v3_removed_configured_property_blocks_without_upstream_call", "crates/boundary/tests/v3_exposure_e2e.rs::v3_removed_selected_tool_blocks_without_upstream_call", "crates/core/src/lib.rs::v3_incompatible_definitions_return_stable_problem_categories"]
+criterion = "Public wire tests verify optional/required upstream changes, blocked stubs, stable reasons, and zero invocation for unsupported or incompatible schemas; there is no implicit proxy fallback."
+
+[[requirement]]
+id = "E20"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/v3_exposure_e2e.rs::v3_restriction_proxy_cache_and_same_connection_reuse_are_enforced", "crates/boundary/tests/v3_exposure_e2e.rs::v3_notification_rebuilds_then_blocks_without_proxy_fallback", "crates/boundary/tests/v3_exposure_e2e.rs::v3_stale_cache_survives_outage_but_calls_require_a_fresh_connection", "crates/boundary/tests/v3_exposure_e2e.rs::v3_cache_is_reused_for_policy_changes_but_not_for_a_changed_target_identity", "crates/boundary/tests/v3_exposure_e2e.rs::v3_cache_write_failure_does_not_discard_fresh_upstream_definitions"]
+criterion = "Public MCP sequences verify same-connection reuse, generation adoption before notification, current-policy projection from stale cache, changed target-identity cache miss, outage failure, and recovery."
+
+[[requirement]]
+id = "E21"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/v3_exposure_e2e.rs::v3_stale_cache_survives_outage_but_calls_require_a_fresh_connection", "crates/boundary/tests/v3_exposure_e2e.rs::v3_upstream_rejection_is_not_reported_as_a_policy_mismatch", "crates/boundary/tests/v3_exposure_e2e.rs::v3_unsupported_schema_is_listed_as_blocked_without_proxy_fallback"]
+criterion = "The public protocol distinguishes transient unavailability, administrator-action-required schema mismatch, unsupported schema, and an upstream rejection; no stale call is sent while metadata discovery is unavailable."
+
+[[requirement]]
+id = "E22"
+kind = "test"
+status = "covered"
+references = ["crates/boundary/tests/v3_exposure_e2e.rs::v3_restriction_proxy_cache_and_same_connection_reuse_are_enforced", "crates/boundary/tests/v3_exposure_e2e.rs::v3_environment_values_do_not_create_persistent_cache_fingerprints", "crates/boundary/tests/v3_exposure_e2e.rs::v3_credential_launch_arguments_disable_persistent_cache_but_not_calls"]
+criterion = "The real on-disk definition cache is inspected after calls containing sentinels to verify it stores upstream definitions only, not fixed values, caller arguments, results, environment values, launch arguments, or deterministic fingerprints of credential-bearing values."
+
+[[requirement]]
+id = "E23"
+kind = "review"
+status = "review"
+references = ["docs/mcp-exposure-v3-design.md", "docs/usage.md", "crates/boundary/src/v3_catalog.rs::concurrent_readers_observe_whole_catalog_snapshots_and_pinned_tool_state", "crates/boundary/src/upstream_definition_cache.rs"]
+criterion = "Review cache/config write protection as a deployment responsibility. The concurrent snapshot test verifies whole-catalog adoption, that readers do not observe mixed target projections, and that an in-flight call retains its captured tool state; downstream list responses and change notifications are serialized with catalog adoption."
